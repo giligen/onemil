@@ -38,7 +38,9 @@ import eod_sections as es  # noqa: E402  (ONE parser for the engine log; ONE BT 
 logger = logging.getLogger("orb_pick_parity")
 
 REASONS = ("universe_live_only", "universe_bt_only", "veto_input_range", "veto_input_pdr", "param_ts_mismatch",
-           "addon_pool", "provisional_fill", "no_fill", "range_missing", "time_stop_leak", "unexplained")
+           "addon_pool", "provisional_fill", "no_fill", "range_missing", "time_stop_leak", "slot_displaced", "unexplained")
+RANKING_ORDER = ("Q4", "Q5", "Q3", "Q2", "Q1")   # orb.yaml ranking.order (engine `self.ranking_order`): quintile, then composite DESC
+NOT_IN_TOPK_DETAIL = "ranged live, not in the live final top-K, composite not comparable"
 COMP_TOL = 1e-4                       # |live comp - BT comp| per shared name
 JOURNAL_WINDOW_UTC = ("13:30", "16:30")   # covers 09:30-12:30 ET in both EDT and EST
 TRADES_DB = ROOT / "data" / "trades.db"
@@ -184,7 +186,38 @@ def _bt_only_reason(s: str, live: Dict, bt: Dict, day_ts_ok: bool, ts_detail: st
             if not day_ts_ok:
                 return _diff(s, "bt_only", "param_ts_mismatch", f"comp live {live['scored'][s][0]:.4f} vs BT {bt['comp'][s][0]:.4f}; {ts_detail}")
             return _diff(s, "bt_only", "unexplained", f"composite differs by {dc:.4f} with matching parameter timestamps")
-    return _diff(s, "bt_only", "unexplained", "ranged live, not in the live final top-K, composite not comparable")
+    return _diff(s, "bt_only", "unexplained", NOT_IN_TOPK_DETAIL)
+
+
+def live_ranks(live: Dict) -> Dict[str, int]:
+    """{symbol: 1-based live rank} over the live scored field UNION the live final set, with the engine's key (quintile in
+    `RANKING_ORDER`, then composite DESC). A final name with no scored entry sorts first (it is in the top-K by definition)."""
+    q_rank = {q: i for i, q in enumerate(RANKING_ORDER)}
+    final, scored = set(live["final"]), live["scored"]
+
+    def key(sym: str):
+        """Sort key of one name: unscored final names first, then (quintile order, -composite, symbol)."""
+        if sym not in scored:
+            return (0, 0, 0.0, sym)
+        comp, q = scored[sym]
+        return (1, q_rank.get(q, len(RANKING_ORDER)), -comp, sym)
+
+    return {sym: i + 1 for i, sym in enumerate(sorted(final | set(scored), key=key))}
+
+
+def _reclassify_slot_displaced(bt_only: Dict[str, Dict], live: Dict, live_only_names: List[str]) -> None:
+    """In place: a `bt_only` name that would be `unexplained` ("ranged live, not in the live final top-K") becomes
+    `slot_displaced` when its live rank r satisfies K < r <= K + n, K = live final size and n = the number of live-final
+    names with no BT feature row (`universe_live_only`): each such name burns exactly one slot the BT gave to a BT name.
+    Every other branch is untouched."""
+    if not live_only_names:
+        return
+    k, ranks = len(live["final"]), live_ranks(live)
+    for s, d in bt_only.items():
+        r = ranks.get(s)
+        if d["reason"] == "unexplained" and d["detail"] == NOT_IN_TOPK_DETAIL and r is not None and k < r <= k + len(live_only_names):
+            d.update(reason="slot_displaced",
+                     detail=f"live rank {r} > K={k}: displaced by live-only {sorted(live_only_names)} (no BT feature row)")
 
 
 def compare(day: str, bt: Optional[Dict], live: Dict, fills: Dict[str, Dict], book: Optional[Dict[str, Dict]] = None,
@@ -228,6 +261,7 @@ def compare(day: str, bt: Optional[Dict], live: Dict, fills: Dict[str, Dict], bo
             diffs.append(_diff(s, "both", "param_ts_mismatch" if not ts_ok else "unexplained",
                                f"live comp {lc[0]:.4f} vs BT {bt['comp'][s][0]:.4f}; {ts_detail}"))
     bt_only = {s: _bt_only_reason(s, live, bt, ts_ok, ts_detail) for s in sorted(B - L)}
+    _reclassify_slot_displaced(bt_only, live, [s for s in sorted(L - B) if s not in bt["day_symbols"]])
     diffs.extend(bt_only.values())
     for s in sorted(L - B):
         if s not in bt["day_symbols"]:
