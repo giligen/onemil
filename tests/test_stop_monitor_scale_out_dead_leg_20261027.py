@@ -43,6 +43,8 @@ def _watch(mon):
 
 
 def _tick(mon, price):
+    for w in mon._watches.values():
+        w.scale_last_attempt_ts = 0.0   # each tick stands for >= 30 s later (D1 attempt window)
     t = MagicMock()
     t.symbol, t.price = 'TEST', price
     asyncio.run(mon._on_trade(t))

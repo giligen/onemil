@@ -44,3 +44,15 @@ D5 Reconciliation — CONFIRMED a defect at 18:40 UTC: the only engine reaction 
 ## Rules for the fixing agent
 Sonnet, ≤ 60 calls, TDD, no git commit, no service restart, no orders. Tests: `pytest tests/ -q -x
 --ignore=tests/integration`; Fable runs the full suite before commit. Weekend boot rehearsal before Monday.
+
+## Status 2026-11-14 (Sat): D1, D2, D3, D5 SHIPPED; D4 OPEN
+D1 `_scale_submit_core`: a submit failure counts toward `scale_fail_count` (disarm at 3, one ERROR) and one attempt per symbol per
+30 s. D2 "register + shrink": `exit_coverage.repair` already registers its stop as `sl_leg_id` when the old leg is dead; new
+`_scale_leg_needs_resize` skips a leg already at/below the runner qty instead of replacing it upward. D3 `_persist_add_on_state`
+writes the blended `entry_price` (fill_price stays the base fill for rehydrate). D5 `_book_external_flat`: broker flat on a watched
+symbol → fresh re-read, last FILLED sell at the broker, emit exit event `external` (new `ExitReason.EXTERNAL`,
+`AlpacaClient.get_last_filled_sell`); never books a guessed price; review guard: the sell must be filled at/after the watch was
+armed (−60 s), else ERROR + watch kept. D4 (lost leg ids after the add-on resize failed) NOT done — journal evidence buried under
+websocket subscription lines; reopen with `journalctl ... | grep -v websocket` on the 11/13 14:35–15:30 window. Tests: 16 in
+`tests/test_orb_scaleout_coverage_conflict_20261113.py` (+2 existing files adjusted for the 30-s window); full suite 5,958 green.
+Boot rehearsal on the exact ExecStart: 2026-11-14 evening (below).

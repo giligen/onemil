@@ -147,6 +147,11 @@ class ExitReason(str, Enum):
     +r_multiple R, stop to the fill (breakeven). Not a full close; later
     full exits carry the `pp+<reason>` prefix (like `exhaust+`)."""
 
+    EXTERNAL = "external"
+    """The broker went flat on a watched symbol with no StopMonitor exit in flight (owner manual
+    close / outside order, DAMD 2026-11-13). Booked by StopMonitor's exit-coverage cycle from the
+    broker's last filled sell."""
+
     SCALE_OUT = "scale_out"
     """ORB winner-stack partial: 40% of the position sold via limit at
     entry + 3.0R (orb.yaml exit.scale_out, 2026-08-22). NOT a full close —
@@ -349,6 +354,7 @@ _ATTRIBUTED_EXITS = frozenset({
     ExitReason.STOPMONITOR_EXIT.value,
     ExitReason.POST_FILL_EXIT.value,
     ExitReason.ORPHAN_RECOVERED_FORCE_CLOSE.value,
+    ExitReason.EXTERNAL.value,
 })
 
 _NEEDS_RECONCILE = frozenset({

@@ -2836,9 +2836,16 @@ class ORBEngine:
                 'add_be_leg': pos.add_be_leg,
                 'add_be_pnl': pos.add_be_pnl,
             }
-            self.db.update_trade(pos.trade_id, {
+            _upd = {
                 'shares': pos.shares,
                 'pattern_data': _json.dumps(pdata),
+            }
+            if pos.combined_avg_price is not None:
+                # D3 (DAMD 2026-11-13): trades.entry_price = share-weighted average of the
+                # combined position; the base fill stays in fill_price (rehydrate reads that).
+                _upd['entry_price'] = float(pos.combined_avg_price)
+            self.db.update_trade(pos.trade_id, {
+                **_upd,
             })
         except Exception as e:
             logger.error(f"[ORB] ADD {pos.symbol}: DB persistence failed ({e}) — "

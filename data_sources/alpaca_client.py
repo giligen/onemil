@@ -1735,6 +1735,44 @@ class AlpacaClient:
             logger.error(f"Failed to get open orders: {e}")
             raise AlpacaAPIError(f"Failed to get open orders: {e}")
 
+    def get_last_filled_sell(self, symbol: str) -> Optional[Dict]:
+        """Most recent CLOSED sell order on `symbol` with filled_qty > 0.
+
+        Used to book an external close from the broker's own fill (D5, 2026-11-13).
+
+        Returns:
+            {'id', 'qty', 'price', 'filled_at'} or None when no filled sell exists.
+
+        Raises:
+            AlpacaAPIError: If the API call fails.
+        """
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+            req = GetOrdersRequest(status=QueryOrderStatus.CLOSED, symbols=[symbol], limit=20)
+            orders = self._call_with_timeout(
+                lambda: self.trading_client.get_orders(filter=req), "get_last_filled_sell")
+            best = None
+            for o in (orders or []):
+                side = str(getattr(getattr(o, 'side', ''), 'value', getattr(o, 'side', ''))).lower()
+                if side.rsplit('.', 1)[-1] != 'sell' or not float(getattr(o, 'filled_qty', 0) or 0):
+                    continue
+                ts = getattr(o, 'filled_at', None)
+                if best is None or (ts is not None and (best[0] is None or ts > best[0])):
+                    best = (ts, o)
+            if best is None:
+                return None
+            o = best[1]
+            return {'id': str(getattr(o, 'id', '') or ''),
+                    'qty': float(getattr(o, 'filled_qty', 0) or 0),
+                    'price': float(getattr(o, 'filled_avg_price', 0) or 0),
+                    'filled_at': best[0]}
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get last filled sell for {symbol}: {e}")
+            raise AlpacaAPIError(f"Failed to get last filled sell for {symbol}: {e}")
+
     @staticmethod
     def _position_dict_from_model(pos) -> Dict:
         """Build the positions dict from an alpaca-py Position model (attribute access)."""

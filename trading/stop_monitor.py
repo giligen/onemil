@@ -61,6 +61,9 @@ from trading.orb_target_limit import CANCEL_ACK_WAIT_S, CancelOutcome, cancel_re
 
 logger = logging.getLogger(__name__)
 
+_SCALE_ATTEMPT_MIN_INTERVAL_S = 30.0   # D1: min seconds between scale submissions per symbol
+_SCALE_MAX_FAILS = 3                   # consecutive scale failures before the scale is disarmed
+
 RECONNECT_DELAY_SECONDS = 60.0  # 60s between retries — stop triggering Alpaca's rate limiter
 MAX_RECONNECT_ATTEMPTS = 60     # 60 × 60s = 1 hour of retrying before giving up
 
@@ -196,7 +199,8 @@ class WatchEntry:
     scale_at_px: float = 0.0       # entry + level_r × range_size
     scale_qty: int = 0             # floor(frac × shares) at arm time
     scale_done: bool = False       # latched once the scale leg is booked
-    scale_fail_count: int = 0      # consecutive leg-resize failures; 3 => scale disarmed (2026-10-27)
+    scale_fail_count: int = 0      # consecutive scale failures (resize OR submit); 3 => scale disarmed (2026-10-27, D1 2026-11-13)
+    scale_last_attempt_ts: float = 0.0  # wall-clock of the last scale submission attempt (D1: >= 30 s apart)
     scale_order_id: str = ''       # resting limit-sell id while working
     scale_in_flight: bool = False  # submission critical-section (short)
     scale_last_poll_ts: float = 0.0  # poll-mode fill-check throttle
@@ -854,6 +858,40 @@ class StopMonitor:
         return bool(getattr(watch, "exit_in_progress", False)) or bool(
             getattr(watch, "scale_in_flight", False))
 
+    def _book_external_flat(self, client, symbol: str, watch: "WatchEntry") -> bool:
+        """D5: the broker is FLAT on a watched symbol (owner / manual / external close).
+
+        Re-reads the position fresh, finds the last filled SELL at the broker and emits a normal
+        exit event (reason `external`) so the owning engine books the row; the watch is retired by
+        the emit. Returns True when booked; False (ERROR, watch kept) when the broker still shows
+        shares or no fill can be found -- never books a guessed price."""
+        fresh = _exit_coverage.check(client, symbol, watch.shares)
+        if fresh.position_qty > 0:
+            return False
+        fill = client.get_last_filled_sell(symbol)
+        px = float((fill or {}).get("price") or 0.0)
+        if px <= 0:
+            logger.error(f"EXIT COVERAGE: {symbol} broker is flat but no filled sell was found "
+                         f"— row NOT booked, watch kept; book it by hand")
+            return False
+        # Review 2026-11-14: the broker's LAST filled sell must belong to THIS position — a sell filled
+        # before the watch was armed (yesterday's exit of a re-entered name, a flat reached by other means)
+        # must never be booked as today's exit price.
+        filled_at = (fill or {}).get("filled_at")
+        fill_ts = getattr(filled_at, "timestamp", lambda: None)()
+        if fill_ts is None or fill_ts < float(getattr(watch, "added_at", 0.0) or 0.0) - 60.0:
+            logger.error(f"EXIT COVERAGE: {symbol} broker is flat but the last filled sell "
+                         f"({filled_at}) predates this watch — row NOT booked, watch kept; book it by hand")
+            return False
+        logger.info(f"EXIT COVERAGE: {symbol} closed externally — booking {watch.shares} sh "
+                    f"@ {px:.4f} (order {str(fill.get('id', ''))[:8]}), watch removed")
+        self._emit_stop_exit_event(
+            symbol, watch, px, qty=watch.shares, order_id=str(fill.get("id", "")),
+            exit_reason=ExitReason.EXTERNAL.value, exit_branch="", trigger_price=0.0,
+            pricing_method="external", limit_price=0.0, bid=0.0, ask=0.0,
+            bid_size=0, ask_size=0)
+        return True
+
     def _exit_coverage_cycle(self) -> Dict[str, int]:
         """One pass of the invariant over all watches.
 
@@ -892,6 +930,8 @@ class StopMonitor:
                 res = _exit_coverage.check(client, symbol, watch.shares, snap)
                 checked += 1
                 if res.broker_short_of_watch:
+                    if res.position_qty <= 0 and self._book_external_flat(client, symbol, watch):
+                        continue
                     if symbol not in self._coverage_warned:
                         self._coverage_warned.add(symbol)
                         logger.warning(
@@ -2117,6 +2157,19 @@ class StopMonitor:
         logger.info(f"StopMonitor: {symbol} watch qty resized {old} -> {new_shares}sh")
         return True
 
+    def _scale_leg_needs_resize(self, client, leg_id: str, runner_qty: int) -> bool:
+        """D2: True unless the leg already covers no more than the runner qty.
+
+        A coverage-placed stop covers only the naked half of the position; a replace UP to the
+        runner qty would fail (the shares are held by the sibling legs) and shrinking is the only
+        resize a scale-out needs. Unknown leg qty -> True (the old behaviour)."""
+        try:
+            raw = (client.get_order(leg_id) or {}).get('qty')
+            return not (isinstance(raw, (int, float, str)) and raw != ''
+                        and float(raw) <= runner_qty)
+        except Exception:
+            return True
+
     def _scale_submit_core(self, symbol: str, watch: WatchEntry) -> bool:
         """Synchronous scale submission: resize safety legs to runner qty,
         then submit an INDEPENDENT limit sell for the scale qty (P0-5.5 —
@@ -2131,6 +2184,15 @@ class StopMonitor:
         Returns True when the scale order is resting (watch.scale_order_id
         set); False = nothing submitted, state unchanged, retry next trigger.
         """
+        # D1 (DAMD 2026-11-13): the broker cannot change faster than this, but the
+        # trigger re-fires on every price tick; ONE attempt per symbol per window
+        # (the 3 h / 120 REST-calls-per-minute retry loop).
+        _now = time_mod.time()
+        if _now - float(watch.scale_last_attempt_ts or 0.0) < _SCALE_ATTEMPT_MIN_INTERVAL_S:
+            logger.debug(f"StopMonitor: {symbol} scale attempt rate-limited "
+                         f"(< {_SCALE_ATTEMPT_MIN_INTERVAL_S:.0f}s since the last)")
+            return False
+        watch.scale_last_attempt_ts = _now
         client = self._client_for(watch.strategy)
         # Broker-truth qty guard (owner 2026-10-01 ask, trading/
         # exit_qty_guard.py -- the SAME module the 9/25 CDNA full-exit fix
@@ -2175,7 +2237,10 @@ class StopMonitor:
             if not leg_id:
                 continue
             try:
-                if runner_qty > 0:
+                if runner_qty > 0 and not self._scale_leg_needs_resize(client, leg_id, runner_qty):
+                    logger.info(f"StopMonitor: {symbol} scale-out {attr} {leg_id[:8]} already "
+                                f"<= runner {runner_qty}sh — resize skipped")
+                elif runner_qty > 0:
                     res = client.replace_order_qty(leg_id, runner_qty)
                     new_id = (res or {}).get('id') or ''
                     if new_id:
@@ -2208,7 +2273,7 @@ class StopMonitor:
                 )
                 # Roll back any leg already resized before this failure.
                 self._restore_scale_legs(symbol, watch, client, resized)
-                if watch.scale_fail_count >= 3:
+                if watch.scale_fail_count >= _SCALE_MAX_FAILS:
                     logger.error(
                         f"StopMonitor: {symbol} scale-out DISARMED after "
                         f"{watch.scale_fail_count} consecutive leg-resize failures "
@@ -2233,6 +2298,13 @@ class StopMonitor:
                 f"(P0-5.2)"
             )
             self._restore_scale_legs(symbol, watch, client, resized)
+            watch.scale_fail_count += 1   # D1: submit failures count like resize failures
+            if watch.scale_fail_count >= _SCALE_MAX_FAILS:
+                logger.error(
+                    f"StopMonitor: {symbol} scale-out DISARMED after {watch.scale_fail_count} "
+                    f"consecutive failures (last submit: {e}) — runner keeps full size, "
+                    f"in-engine stop still protects the position")
+                watch.scale_qty = 0
             return False
         watch.scale_order_id = order_id
         watch.scale_fail_count = 0

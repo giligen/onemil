@@ -145,7 +145,8 @@ class TestLegFailureCompensation:
         mock_alpaca.submit_limit_sell_order.assert_not_called()
         assert w.scale_order_id == ''
         assert monitor.is_exit_in_progress('TEST') is False
-        # retry allowed on a later tick
+        # retry allowed on a later tick (D1: >= 30 s later -- the per-symbol attempt window)
+        w.scale_last_attempt_ts -= 31.0
         mock_alpaca.replace_order_qty.side_effect = (
             lambda oid, qty: {'id': f'new-{oid}', 'status': 'accepted'})
         _tick(monitor, 13.06)
