@@ -11,3 +11,10 @@ Joint gap-T3 × L1-T3 (TRAIN gap cut 17.6 %): VAL n 200, +266 bp, t 3.4, ex-top-
 Verdict FAIL: worst-5 % −17 % vs bar −12 %, placebo (ii) not beaten, joint fails names/day. Passed: VAL ≥ +50, t ≥ 2, halves, ex-top-5 %, P10. Pre-open L1 is predictive (VAL +159 vs T1 −41) but the tail and same-name fade remain. Independent rebuild not done.
 
 CHILDREN: (1) tail control on L1-T3 / gap-T3: hard cap on cover loss (stop-buy at +X %) priced at the measured ask, with its own PREREG; (2) same-name +5d placebo with full pool (all population days, ≥ 100 n) to resolve the thin placebo.
+
+## Independent rebuild (prose-only, `1776R_build.py`, 2026-11-14) — NOT CONFIRMED on the book size, CONFIRMED on pricing and sign
+Per-trade pricing identical (342 matched trades, mean |net diff| 0.00 bp). The rebuild's L1 top tercile holds 496 VAL trades
+(first build 342: a tercile-boundary/population difference, not pricing): VAL +144.6 bp net, day-t 2.73, ex-top-5 % +0.2 bp,
+worst-5 % −17.0 %, weekly P10 −0.66 R, median 5 names/day; TRAIN +188 (t 3.5; Jul–Sep +282 / Oct–Dec +88). Placebos at the
+measured ask, properly sized: same-name +5d n 456 mean +3 bp p95 +51 — CLEARED; same-tercile non-book n 573 mean −74 p95 −57 —
+CLEARED. The reportable line is the rebuild's. Still failing the bar: worst-5 % (−17 % vs −12 %), ex-top-5 % ≈ 0.
