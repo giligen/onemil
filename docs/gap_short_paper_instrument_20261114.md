@@ -49,3 +49,20 @@ rehearsal of the live service. Modes (all idempotent, all with `--dry-run`):
 Crons (ET block, standing-authorized): 26 9, 30 10, 40 10 (1-5); 15 16 (1-5); 10 17 (5). Tests: unit (mocked client with spec=),
 integration (paper account read-only: assets/borrow_status, quotes GET), and a `--dry-run --pick` system run Monday 09:26 before
 the first real paper order (the first live-paper day is Tuesday 11/17 unless the dry run is clean and the owner says Monday).
+
+## Amendment 2026-11-14 (late): opg deadline
+Alpaca rejects `opg` orders submitted after 09:28:00 ET. Therefore: `--pick` cron is **09:20 ET** (was 09:26); the L1 window is
+**04:00-09:19 ET** live (the BT used 04:00-09:25 - the ONE deliberate deviation; the parity test keeps the BT window via
+`BT_PM_END_HM`). `--pick` scans in two stages (snapshot gap screen with latest trade timestamp TODAY >= 04:00 ET, then 1-min bars
+only for gap-qualified names). Hard clock guard: no opg submit after 09:27:30 ET (WARNING "OPG deadline passed, n names not
+submitted"). Skip qty = floor(300/price) < 1 and prev close < $1. Broker rejections are WARNING with the message and counted in
+the ledger (`entry_status=rejected`); ERROR only if every submitted pick is rejected.
+
+## Population = cell 1,428 (supersedes rules 1-2 above)
+Candidates are the BT's (research/hod_entry/cell_1428.py): gap >= 5 % (BT: 09:30 open vs prior close; live at 09:19: pre-market
+last trade vs prior close - the one unavoidable deviation), price $3-30 (BT: open; live: pre-market last), PRIOR-DAY volume >= 500,000
+shares (daily_bars, single day), test tickers excluded; no $1 M dollar-volume rule. Then top-10 by gap, then L1 >= $7,224,000 (the
+BT's exact cutoff, frozen as `L1_MIN_USD`) over 04:00-09:19 ET. Self-healing (deterministic): every mode reconciles first (any
+gapshort short open after 10:40 ET is market-covered, ERROR once); cover = limit ask+10 bp -> 60 s replace at fresh ask -> 120 s market;
+pick is idempotent per symbol-day; API failure x3 -> day skipped (WARNING, ledger status=skipped_api); pause flag blocks --pick (INFO),
+cleared only by --weekly after a green week. Nightly `scripts/gap_short_parity.py` (35 16 ET Mon-Fri) = BT-vs-live shadow parity.
