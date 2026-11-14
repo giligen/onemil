@@ -4,9 +4,9 @@ FROZEN 2026-11-14 before any number. Cell 1,775. Rules: write only `research/sig
 URIs; `ulimit -v 2500000; nice -n 19`; budget ≤ 60 calls. Network: ONLY Alpaca news REST history
 (`GET https://data.alpaca.markets/v1beta1/news?symbols=&start=&end=&limit=50&include_content=false`, HOD paper keys from .env,
 never printed), ≤ 200 req/min, cached per day in `research/signal_search/1775_cache/news/<day>.parquet` (atomic, resumable).
-Classification = Claude Haiku 4.5 (owner's order 11/14: 'no regex'), run through this session's agent harness in batches of
-≤ 300 headlines (the cell's own python has no API key — ANTHROPIC_API_KEY pending from the owner); the rubric below is the
-prompt, fixed before any number; labels cached in `1775_labels.parquet` (headline id → category, strength 1–5, one-line why).
+Classification = Claude Haiku 4.5 (`claude-haiku-4-5-20251001`, anthropic SDK, key from `/home/ec2-user/onemil/.env` loaded with
+`load_dotenv(..., override=True)` — the shell's exported key is stale; never print it), ≤ 40 headlines per request, strict JSON,
+temperature 0, ≤ 5 requests/s; the rubric below is the prompt, fixed before any number; labels cached in `1775_labels.parquet` (headline id → category, strength 1–5, one-line why).
 No regex anywhere in this cell (owner 11/14).
 
 ## Why
