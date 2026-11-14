@@ -1,5 +1,5 @@
 #!/bin/bash
-# GAPSHORT nightly auto-fix (owner 2026-11-14). Runs Claude Code headless on docs/autofix/gapshort_autofix_prompt.md.
+# GAPSHORT nightly auto-fix — FALLBACK ONLY (owner 2026-11-14 evening: the nightly fix runs from the interactive session via CronCreate; this wrapper is for manual use / if the session is down). Runs Claude Code headless on docs/autofix/gapshort_autofix_prompt.md.
 # Guard rails live in the prompt (file allow-list, frozen constants, full suite, branch-only commits) and in the tool allow-list below.
 set -u
 cd /home/ec2-user/onemil || exit 1
