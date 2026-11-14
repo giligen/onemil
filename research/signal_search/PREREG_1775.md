@@ -7,7 +7,7 @@ never printed), ≤ 200 req/min, cached per day in `research/signal_search/1775_
 Classification = Claude Haiku 4.5 (owner's order 11/14: 'no regex'), run through this session's agent harness in batches of
 ≤ 300 headlines (the cell's own python has no API key — ANTHROPIC_API_KEY pending from the owner); the rubric below is the
 prompt, fixed before any number; labels cached in `1775_labels.parquet` (headline id → category, strength 1–5, one-line why).
-The regex rubric is run too, as an AGREEMENT check only (report Cohen's kappa), never as the classifier.
+No regex anywhere in this cell (owner 11/14).
 
 ## Why
 1,773 (MOO short → MOC) fails on its tail: worst-5 % −21 %, ex-top-5 % of winners < 0. The question is whether the squeeze days
@@ -22,7 +22,7 @@ null on the MEAN; the read that matters is the TAIL.
 of day D] from Alpaca news (Benzinga, history back to 2015). Coverage rail: ≥ 80 % of symbol-days queried successfully;
 "no headline" is a valid category, not missing.
 
-## Rubric (Haiku prompt categories; the regex hints beside each are the agreement-check patterns only)
+## Rubric (Haiku prompt categories; the word lists are DESCRIPTIONS for the prompt, not patterns)
 Haiku also returns `strength` 1–5: 5 = binding, company-changing, verified (FDA approval, signed M&A, large contract with a
 named counterparty); 1 = promotional / vague / recycled. Output strict JSON per headline; unparseable → re-ask once, else NONE.
 1 MA: acqui|merger|buyout|takeover|to be acquired|definitive agreement
