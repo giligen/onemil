@@ -602,3 +602,29 @@ def test_score_finds_day_resubmit_entry_and_records_status():
     assert out["entry_fill"] == 15.0 and out["entry_status"] == "filled"
     out = gp.score_row(row, [dict(orders[0], status="expired")], {"open": 15.0})
     assert out["entry_status"] == "expired"
+
+
+def test_universe_keyed_on_previous_session_after_the_close(tmp_path, caplog):
+    """2026-11-16 21:35 UTC: the parity run found MAX(bar_date) = today (nightly build done) and refused as 'stale'."""
+    import sqlite3
+    db = tmp_path / "c_post_close.db"
+    con = sqlite3.connect(db)
+    con.execute("create table daily_bars(symbol text, bar_date text, close real, volume real)")
+    con.execute("insert into daily_bars values('OK', '2026-11-13', 4.0, 600000)")
+    con.execute("insert into daily_bars values('OK', '2026-11-16', 3.5, 900000)")      # today's bar, must be ignored
+    con.execute("insert into daily_bars values('NEW', '2026-11-16', 9.0, 900000)")     # only today -> not in the universe
+    con.commit(); con.close()
+    assert gp.load_universe(db, "2026-11-16") == {"OK": 4.0}
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+def test_universe_refuses_when_previous_session_bar_missing(tmp_path, caplog):
+    import sqlite3
+    db = tmp_path / "c_gap.db"
+    con = sqlite3.connect(db)
+    con.execute("create table daily_bars(symbol text, bar_date text, close real, volume real)")
+    con.execute("insert into daily_bars values('OK', '2026-11-12', 4.0, 600000)")
+    con.execute("insert into daily_bars values('OK', '2026-11-16', 3.5, 900000)")      # 11-13 absent
+    con.commit(); con.close()
+    assert gp.load_universe(db, "2026-11-16") == {}
+    assert any("no rows for the previous session 2026-11-13" in r.message for r in caplog.records if r.levelname == "ERROR")

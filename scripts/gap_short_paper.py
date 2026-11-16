@@ -202,22 +202,29 @@ def _resubmit_as_day(broker, row: dict, p: dict, day: str, sym: str, err: Except
 
 # ---- pick ---------------------------------------------------------------------------------------------------------------
 def load_universe(db_path=ll.CACHE_DB, day: str = "") -> dict:
-    """symbol -> prior close for the last daily_bars date with PRIOR-DAY volume >= 500 K shares (cell 1,428 population; the
-    locate_ledger $1 M dollar-volume rule is deliberately NOT applied). Read-only. {} (+ ERROR) unless MAX(bar_date) is the
-    previous NYSE session of `day` (default today ET): a stale cache means wrong prior closes, so the caller must not pick."""
+    """symbol -> prior close on the PREVIOUS NYSE session of `day` (default today ET) for names with that session's volume
+    >= 500 K shares (cell 1,428 population; the locate_ledger $1 M dollar-volume rule is deliberately NOT applied). Read-only.
+    The universe is keyed on the previous session's bar explicitly, so the same answer comes back at 09:20 (cache ends at the
+    previous session) and after the close (today's bar already appended by the nightly build — 2026-11-16 the 16:35 parity
+    run refused with "stale" because MAX(bar_date) was today). {} (+ ERROR) only when the previous session's bar is MISSING
+    (MAX(bar_date) older than it): a stale cache means wrong prior closes, so the caller must not pick."""
     import sqlite3
     day = day or et_now().strftime("%Y-%m-%d")
+    prev = R.previous_session(day)
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         last = con.execute("SELECT MAX(bar_date) FROM daily_bars").fetchone()[0]
-        if last != R.previous_session(day):
-            logger.error("daily_bars stale (%s) - refusing to pick (expected %s)", last, R.previous_session(day))
+        if last is None or last < prev:
+            logger.error("daily_bars stale (%s) - refusing to pick (expected %s)", last, prev)
             return {}
         rows = con.execute("SELECT symbol, close FROM daily_bars WHERE bar_date=? AND volume>=? AND close>0",
-                           (last, R.PRIOR_DAY_VOL_MIN)).fetchall()
+                           (prev, R.PRIOR_DAY_VOL_MIN)).fetchall()
     finally:
         con.close()
-    logger.info("pick universe: %d symbols with prior-day volume >= %d on %s", len(rows), R.PRIOR_DAY_VOL_MIN, last)
+    if not rows:
+        logger.error("daily_bars has no rows for the previous session %s (MAX %s) - refusing to pick", prev, last)
+        return {}
+    logger.info("pick universe: %d symbols with prior-day volume >= %d on %s", len(rows), R.PRIOR_DAY_VOL_MIN, prev)
     return {s: float(c) for s, c in rows if not R.is_excluded_symbol(s)}
 
 
