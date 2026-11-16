@@ -396,6 +396,13 @@ class StopMonitor:
     # for a race that cleared one second later. Cumulative 10.5 s now; a TRUE exhaustion still raises -> ERROR/CRITICAL.
     _HELD_QTY_RETRY_BACKOFFS_S = (0.5, 1.0, 2.0, 3.0, 4.0)
 
+    # 2026-11-16 CLS: the bracket SL leg was EXECUTING at the paper OMS (slow fill) while we fought it with
+    # cancel + close_position + a naked emergency stop. Budget to wait for such a leg's fill instead.
+    _LEG_EXECUTING_POLL_S = 30
+    _LEG_EXECUTING_POLL_INTERVAL_S = 1.0
+    # Delay before re-checking that an emergency stop was not placed on a position that went flat meanwhile.
+    _EMERGENCY_RECHECK_DELAY_S = 2.0
+
     # HOD-break tape-accurate resting entry (docs/hod_resting_entry_spec_20260925.md): cap on
     # concurrently print-watched symbols. ARMED HOD candidates are a small, fast-turnover pool
     # (unlike the whole-universe bar stream) — 200 is generous headroom over a busy day's count.
@@ -429,6 +436,56 @@ class StopMonitor:
         # Exhausted retries — re-raise so caller can place emergency SL
         assert last_err is not None
         raise last_err
+
+    async def _broker_position_state(self, client, symbol: str) -> Optional[bool]:
+        """True if the broker holds an open position in ``symbol``, False if flat,
+        None if it cannot be determined (query error / unexpected shape; logged WARNING)."""
+        loop = asyncio.get_event_loop()
+        try:
+            positions = await loop.run_in_executor(None, client.get_open_positions)
+        except Exception as e:
+            logger.warning(
+                f"StopMonitor: {symbol} position query failed ({e}) — treating position state as unknown"
+            )
+            return None
+        if not isinstance(positions, (list, tuple)):
+            logger.warning(
+                f"StopMonitor: {symbol} position query returned {type(positions).__name__}, not a list — "
+                f"treating position state as unknown"
+            )
+            return None
+        for pos in positions:
+            if str((pos or {}).get('symbol', '')).upper() == symbol.upper():
+                try:
+                    return abs(float(pos.get('qty', 1) or 0)) > 0
+                except (TypeError, ValueError):
+                    return True
+        return False
+
+    async def _wait_for_leg_fill(
+        self, client, symbol: str, leg_id: str, trigger_price: float,
+    ) -> Optional[float]:
+        """Poll ``leg_id`` once a second for up to ``_LEG_EXECUTING_POLL_S``; return its
+        fill price, or None if it did not fill (or reached a terminal non-fill state)."""
+        loop = asyncio.get_event_loop()
+        attempts = max(1, int(self._LEG_EXECUTING_POLL_S / self._LEG_EXECUTING_POLL_INTERVAL_S))
+        for i in range(attempts):
+            try:
+                info = await loop.run_in_executor(None, client.get_order, leg_id)
+                status = str(info.get('status', '')).lower()
+                if status == 'filled':
+                    price = float(info.get('filled_avg_price') or trigger_price)
+                    logger.info(
+                        f"StopMonitor: {symbol} executing leg {leg_id[:8]} filled at ${price:.4f} "
+                        f"(poll {i + 1}) — using as exit"
+                    )
+                    return price
+                if status in ('canceled', 'cancelled', 'expired', 'rejected'):
+                    return None
+            except Exception as e:
+                logger.warning(f"StopMonitor: {symbol} leg {leg_id[:8]} status poll failed: {e}")
+            await asyncio.sleep(self._LEG_EXECUTING_POLL_INTERVAL_S)
+        return None
 
     async def _place_emergency_stop_fallback(
         self,
@@ -476,6 +533,13 @@ class StopMonitor:
         watch_stop = float(getattr(watch, 'stop_price', trigger_price) or trigger_price)
         emergency_stop_price = round(min(trigger_price, watch_stop) * 0.99, 2)
 
+        # 2026-11-16 CLS: never place a stop on a flat position (it would open a naked short on trigger).
+        if await self._broker_position_state(client, symbol) is False:
+            logger.info(
+                f"StopMonitor: {symbol} position flat — no emergency stop needed. reason={reason}"
+            )
+            return None
+
         try:
             em_result = await self._submit_with_held_qty_retry(
                 loop,
@@ -486,6 +550,20 @@ class StopMonitor:
                 label=f"{symbol} emergency_stop",
             )
             em_id = (em_result or {}).get('id', '') if em_result else ''
+            await asyncio.sleep(self._EMERGENCY_RECHECK_DELAY_S)
+            if em_id and await self._broker_position_state(client, symbol) is False:
+                try:
+                    await loop.run_in_executor(None, client.cancel_order, em_id)
+                    logger.warning(
+                        f"StopMonitor: {symbol} cancelled dangling emergency stop {em_id} "
+                        f"(position flat)"
+                    )
+                except Exception as cancel_err:
+                    logger.error(
+                        f"StopMonitor: {symbol} emergency stop {em_id} is DANGLING on a flat position and "
+                        f"cancel failed: {cancel_err} — CANCEL MANUALLY"
+                    )
+                return None
             logger.critical(
                 f"StopMonitor: {symbol} placed EMERGENCY stop-market @ "
                 f"${emergency_stop_price:.2f} (order={em_id}). "
@@ -4150,14 +4228,27 @@ class StopMonitor:
         # best be a wasted REST call and at worst — with a loose test double
         # or a broker that answers optimistically — report somebody else's
         # fill as this exit's.
+        cancel_ok = None
         if stale_limit_order_id:
             try:
-                await loop.run_in_executor(
+                cancel_ok = await loop.run_in_executor(
                     None, client.cancel_order, stale_limit_order_id)
             except Exception as e:
                 logger.debug(
                     f"StopMonitor: {symbol} cancel after fill-timeout: {e}"
                 )
+            # AlpacaClient.cancel_order returns False for 404 / 422 "not cancelable (may be filled)".
+            is_leg = bool(sl_leg_id) and sl_leg_id == stale_limit_order_id
+            if cancel_ok is False or is_leg:
+                if cancel_ok is False:
+                    logger.warning(
+                        f"StopMonitor: {symbol} order {stale_limit_order_id[:8]} not cancelable — leg "
+                        f"executing at the broker, waiting for its fill instead of fighting it"
+                    )
+                leg_price = await self._wait_for_leg_fill(
+                    client, symbol, stale_limit_order_id, trigger_price)
+                if leg_price is not None:
+                    return leg_price, stale_limit_order_id, self.BRANCH_LIMIT_RACE
         # Race: limit may have filled during cancel — check one more time.
         try:
             if not stale_limit_order_id:
@@ -4215,6 +4306,20 @@ class StopMonitor:
                     f"VERIFY POSITION MANUALLY on Alpaca."
                 )
             else:
+                # 2026-11-16 CLS: the SL leg may have been executing the whole time. Re-check before alarming.
+                sl_price = await self._sl_leg_fill_price(client, sl_leg_id)
+                if sl_price is not None:
+                    logger.info(
+                        f"StopMonitor: {symbol} market close failed ({e}) but SL leg filled at "
+                        f"${sl_price:.4f} — using as exit, no emergency stop"
+                    )
+                    return sl_price, (sl_leg_id or ''), self.BRANCH_SL_LEG_RACE
+                if await self._broker_position_state(client, symbol) is False:
+                    logger.warning(
+                        f"StopMonitor: {symbol} market close failed ({e}) and position is flat; leg fill "
+                        f"price unavailable — using trigger ${trigger_price:.2f}, no emergency stop"
+                    )
+                    return trigger_price, (sl_leg_id or ''), self.BRANCH_SL_LEG_RACE
                 # Includes 40310000 / held_for_orders after retry exhaust.
                 # The position is ON the broker, not flat. Emergency stop
                 # placed below before we return LAST_RESORT.

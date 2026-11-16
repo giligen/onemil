@@ -17,7 +17,8 @@ CTX = {"pause_active": False, "universe": {"AAA", "BBB"}, "open_price": 10.0}
     ({"entry_status": "skipped", "note": "existing position/order"}, {}, "existing_position"),
     ({"entry_status": "rejected", "note": "asset cannot be sold short"}, {}, "rejected_htb"),
     ({"entry_status": "rejected", "note": "SSR restriction in effect"}, {}, "rejected_ssr"),
-    ({"entry_status": "rejected", "note": "???"}, {}, "unexplained"),
+    ({"entry_status": "rejected", "note": "???"}, {}, "entry_not_filled"),
+    ({"entry_status": "expired", "note": ""}, {}, "entry_not_filled"),
     (None, {"pause_active": True}, "pause_flag"),
     (None, {"open_price": 400.0}, "qty_floor"),
     (None, {"universe": set()}, "universe_diff"),
@@ -84,3 +85,13 @@ def test_write_rows_idempotent(tmp_path):
     assert gpar.write_rows(D, [], p) is True
     assert gpar.write_rows(D, [{"date": D, "symbol": "AAA", "side": "matched"}], p) is False
     assert len(gp.read_ledger(p)) == 1
+
+
+def test_expired_entry_and_day_fill_vs_open_reasons():
+    bt = [{"symbol": "AAA", "open": 10.0, "ask": 9.0, "net": 1.0}, {"symbol": "BBB", "open": 10.0, "ask": 9.0, "net": 1.0}]
+    led = [{"date": D, "symbol": "AAA", "entry_status": "expired", "order_id": "x"},
+           {"date": D, "symbol": "BBB", "entry_status": "filled", "entry_fill": "9.985", "order_id": "y", "entry_tif": "day"}]
+    by = {r["symbol"]: r for r in gpar.compare(D, bt, led, CTX)}
+    assert by["AAA"]["side"] == "bt_only" and by["AAA"]["reason"] == "entry_not_filled" and "expired" in by["AAA"]["detail"]
+    assert by["BBB"]["side"] == "matched" and by["BBB"]["reason"] == "entry_day_vs_open" and by["BBB"]["entry_slip_bp"] == 15.0
+    assert "15.0 bp" in by["BBB"]["detail"] and by["BBB"]["reason"] in gpar.REASONS

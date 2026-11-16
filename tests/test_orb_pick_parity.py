@@ -92,3 +92,21 @@ def test_log_result_emits_no_error(caplog):
     assert "slot_displaced 1" in line and "unexplained 0" in line
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert [r for r in caplog.records if r.levelno == logging.INFO]
+
+
+def test_bt_ranked_is_cwd_independent(tmp_path, monkeypatch):
+    """11/16 regression: cron runs with cwd=$HOME; load_bt_config('orb.yaml') then fell back to legacy N=4 and the
+    BT top-K shrank to 4 names (3 false 'unexplained'). bt_ranked must read orb.yaml by absolute path."""
+    import eod_sections as es
+    seen = []
+    import study_orb_pipeline_static_lock as sl
+    real = sl.load_bt_config
+
+    def spy(yaml_path="orb.yaml"):
+        seen.append(yaml_path)
+        return real(yaml_path)
+
+    monkeypatch.setattr(sl, "load_bt_config", spy)
+    monkeypatch.chdir(tmp_path)
+    es.bt_ranked("2026-11-13")
+    assert seen and all(__import__("os").path.isabs(p) for p in seen)

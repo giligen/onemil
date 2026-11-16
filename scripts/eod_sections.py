@@ -739,7 +739,7 @@ def bt_ranked(day: str, features_csv: Optional[str] = None, n: Optional[int] = N
         if not path:
             return None, "no features CSV"
         with contextlib.redirect_stdout(io.StringIO()):   # load_bt_config prints its config banner
-            cfg = load_bt_config()
+            cfg = load_bt_config(str(ROOT / "orb.yaml"))   # absolute: cron cwd is $HOME (11/16: relative path -> legacy N=4)
         y = yaml.safe_load(open(ROOT / "orb.yaml"))
         raw = read_orb_csv(path)
         raw["date"] = pd.to_datetime(raw["date"]).dt.strftime("%Y-%m-%d")

@@ -44,7 +44,7 @@ def _broker(positions=None, orders=None):
     b = MagicMock(spec=gp.PaperBroker)
     b.positions.return_value = positions or {}
     b.orders_today.return_value = orders or []
-    b.short_opg.return_value = {"id": "oid1", "status": "accepted"}
+    b.short_at_open.return_value = {"id": "oid1", "status": "accepted"}
     return b
 
 
@@ -68,7 +68,7 @@ def test_pick_submits_opg_shorts_and_writes_ledger(paths):
     client = _client(SNAPS, {"AAA": _bars(9e6), "BBB": _bars(8e6)})
     broker = _broker()
     assert gp.run_pick(False, client, broker, _session(), UNI, NOW) == 0
-    assert [c.args for c in broker.short_opg.call_args_list] == [("AAA", 20, "gapshort-2026-11-16-AAA"), ("BBB", 23, "gapshort-2026-11-16-BBB")]
+    assert [c.args for c in broker.short_at_open.call_args_list] == [("AAA", 20, "gapshort-2026-11-16-AAA", gp.ENTRY_TIF_DEFAULT), ("BBB", 23, "gapshort-2026-11-16-BBB", gp.ENTRY_TIF_DEFAULT)]
     rows = gp.read_ledger()
     assert {r["symbol"] for r in rows} == {"AAA", "BBB"} and rows[0]["order_id"] == "oid1"
     assert rows[1]["borrow_status"] != "" and rows[1]["locate_status"] == "etb"
@@ -79,7 +79,7 @@ def test_pick_dry_run_places_no_order_and_writes_nothing(paths):
     client = _client(SNAPS, {"AAA": _bars(9e6)})
     broker = _broker()
     gp.run_pick(True, client, broker, _session(), UNI, NOW)
-    broker.short_opg.assert_not_called()
+    broker.short_at_open.assert_not_called()
     assert not gp.LEDGER.exists()
 
 
@@ -87,16 +87,16 @@ def test_pick_skips_existing_position_and_low_l1(paths):
     client = _client(SNAPS, {"AAA": _bars(9e6), "BBB": _bars(1e6)})
     broker = _broker(positions={"AAA": (-5.0, 15.0)})
     gp.run_pick(False, client, broker, _session(), UNI, NOW)
-    broker.short_opg.assert_not_called()
+    broker.short_at_open.assert_not_called()
     assert [r["note"] for r in gp.read_ledger()] == ["existing position/order"]
 
 
 def test_pick_rejection_logged_error_no_retry(paths, caplog):
     client = _client(SNAPS, {"AAA": _bars(9e6)})
     broker = _broker()
-    broker.short_opg.side_effect = RuntimeError("asset not shortable")
+    broker.short_at_open.side_effect = RuntimeError("asset not shortable")
     gp.run_pick(False, client, broker, _session(), UNI, NOW)
-    assert broker.short_opg.call_count == 1
+    assert broker.short_at_open.call_count == 1
     assert any("ALL 1 submitted picks" in r.message for r in caplog.records if r.levelname == "ERROR")
     assert gp.read_ledger()[0]["entry_status"] == "rejected"
 
@@ -189,7 +189,7 @@ def test_bars_fetched_only_for_gap_qualified_names(paths):
 def test_partial_rejection_is_warning_not_error(paths, caplog):
     client = _client(SNAPS, {"AAA": _bars(9e6), "BBB": _bars(9e6)})
     broker = _broker()
-    broker.short_opg.side_effect = [RuntimeError("HTB"), {"id": "o2", "status": "accepted"}]
+    broker.short_at_open.side_effect = [RuntimeError("HTB"), {"id": "o2", "status": "accepted"}]
     gp.run_pick(False, client, broker, _session(), UNI, NOW)
     assert not [r for r in caplog.records if r.levelname == "ERROR"]
     assert any(r.levelname == "WARNING" and "rejected" in r.message for r in caplog.records)
@@ -199,7 +199,7 @@ def test_deadline_mid_loop_stops_submitting(paths, caplog):
     client = _client(SNAPS, {"AAA": _bars(9e6), "BBB": _bars(9e6)})
     broker = _broker()
     gp.run_pick(False, client, broker, _session(), UNI, NOW, clock=lambda: datetime(2026, 11, 16, 9, 27, 40, tzinfo=R.ET))
-    broker.short_opg.assert_not_called()
+    broker.short_at_open.assert_not_called()
     assert any("OPG deadline passed, 2 names not submitted" in r.message for r in caplog.records)
 
 
@@ -208,7 +208,7 @@ def test_qty_below_one_skipped(paths):
     client = _client(snaps, {"AAA": _bars(9e6)})
     broker = _broker()
     gp.run_pick(False, client, broker, _session(), {"AAA": 300.0}, NOW)
-    broker.short_opg.assert_not_called()
+    broker.short_at_open.assert_not_called()
 
 
 def test_universe_loader_uses_prior_day_volume_not_dollar_volume(tmp_path):
@@ -234,7 +234,7 @@ def test_pick_idempotent_skips_symbol_with_any_status_order_today(paths):
     client = _client(SNAPS, {"AAA": _bars(9e6)})
     broker = _broker(orders=[{"client_order_id": f"gapshort-{DAY}-AAA", "symbol": "AAA", "status": "filled"}])
     gp.run_pick(False, client, broker, _session(), UNI, NOW)
-    broker.short_opg.assert_not_called()
+    broker.short_at_open.assert_not_called()
 
 
 def test_api_failure_skips_day_with_warning_and_ledger_row(paths, caplog, monkeypatch):
@@ -374,7 +374,7 @@ def test_item4_deadline_mid_loop_writes_row_for_every_remaining_pick(paths, capl
     broker = _broker()
     gp.run_pick(False, client, broker, _session(), {"AAA": 10.0, "BBB": 10.0, "CCC": 10.0}, NOW, clock=lambda: next(times))
     rows = {r["symbol"]: r for r in gp.read_ledger()}
-    assert broker.short_opg.call_count == 1 and rows["AAA"]["entry_status"] != "not_submitted"
+    assert broker.short_at_open.call_count == 1 and rows["AAA"]["entry_status"] != "not_submitted"
     assert rows["BBB"]["entry_status"] == rows["CCC"]["entry_status"] == "not_submitted" and rows["CCC"]["note"] == "opg deadline"
     assert any("2 names not submitted" in r.message for r in caplog.records)
 
@@ -423,7 +423,7 @@ def test_item6_pick_with_stale_universe_places_nothing(paths, monkeypatch):
     monkeypatch.setattr(gp, "load_universe", lambda *a, **k: {})
     broker = _broker()
     assert gp.run_pick(False, _client(SNAPS, {}), broker, _session(), None, NOW) == 0
-    broker.short_opg.assert_not_called()
+    broker.short_at_open.assert_not_called()
 
 
 def test_item7_day_kill_wired_into_cover(paths, monkeypatch, caplog):
@@ -536,3 +536,69 @@ def test_item17_zero_rows_score_info_when_pick_ran_else_warning(paths, caplog, m
     with caplog.at_level(logging.INFO):
         gp.run_score(False, MagicMock(spec=AlpacaClient), _broker(), NOW)
     assert any(r.levelname == "WARNING" and "no pick ran" in r.message for r in caplog.records)
+
+
+def _borrow_session(status):
+    """Session whose /v2/assets borrow_status answers `status` (locate quotes as in _session)."""
+    s = _session()
+    s.get.return_value.json.return_value = dict(s.get.return_value.json.return_value, borrow_status=status)
+    return s
+
+
+def test_tif_htb_pick_goes_day_and_etb_uses_default(monkeypatch):
+    assert gp.choose_entry_tif("hard_to_borrow") == gp.ENTRY_TIF_HTB == "day"
+    monkeypatch.setattr(gp, "ENTRY_TIF_DEFAULT", "opg")
+    assert gp.choose_entry_tif("easy_to_borrow") == "opg" and gp.choose_entry_tif("hard_to_borrow") == "day"
+
+
+def test_pick_htb_submits_day_and_ledger_records_tif(paths):
+    broker = _broker()
+    gp.run_pick(False, _client(SNAPS, {"AAA": _bars(9e6)}), broker, _borrow_session("hard_to_borrow"), UNI, NOW)
+    assert broker.short_at_open.call_args.args[3] == "day"
+    assert gp.read_ledger()[0]["entry_tif"] == "day"
+
+
+def test_pick_etb_uses_default_tif(paths, monkeypatch):
+    monkeypatch.setattr(gp, "ENTRY_TIF_DEFAULT", "opg")
+    broker = _broker()
+    gp.run_pick(False, _client(SNAPS, {"AAA": _bars(9e6)}), broker, _borrow_session("easy_to_borrow"), UNI, NOW)
+    assert broker.short_at_open.call_args.args[3] == "opg" and gp.read_ledger()[0]["entry_tif"] == "opg"
+
+
+def test_opg_rejected_42210000_resubmits_once_as_day_with_new_id(paths, monkeypatch, caplog):
+    monkeypatch.setattr(gp, "ENTRY_TIF_DEFAULT", "opg")
+    broker = _broker()
+    broker.short_at_open.side_effect = [RuntimeError('{"code":42210000,"message":"only day orders"}'), {"id": "o2", "status": "accepted"}]
+    gp.run_pick(False, _client(SNAPS, {"AAA": _bars(9e6)}), broker, _borrow_session("easy_to_borrow"), UNI, NOW)
+    calls = broker.short_at_open.call_args_list
+    assert len(calls) == 2 and calls[0].args[3] == "opg" and calls[1].args[3] == "day" and calls[0].args[2] != calls[1].args[2]
+    r = gp.read_ledger()[0]
+    assert r["entry_tif"] == "day" and r["order_id"] == "o2" and "42210000" in r["note"]
+    assert any(x.levelname == "WARNING" and "resubmitting" in x.message for x in caplog.records)
+
+
+def test_day_rejected_stays_rejected_no_resubmit(paths):
+    broker = _broker()
+    broker.short_at_open.side_effect = RuntimeError("42210000 nope")
+    gp.run_pick(False, _client(SNAPS, {"AAA": _bars(9e6)}), broker, _borrow_session("hard_to_borrow"), UNI, NOW)
+    assert broker.short_at_open.call_count == 1
+    r = gp.read_ledger()[0]
+    assert r["entry_status"] == "rejected" and "42210000" in r["note"]
+
+
+def test_old_ledger_without_entry_tif_loads_and_migrates(paths):
+    old = [c for c in gp.COLUMNS if c != "entry_tif"]
+    gp.write_ledger([{"date": DAY, "symbol": "OLD", "qty": "5"}], gp.LEDGER, old)
+    assert gp.read_ledger()[0]["entry_tif"] == ""
+    gp.ensure_ledger_schema()
+    assert gp.LEDGER.read_text().splitlines()[0].split(",") == gp.COLUMNS
+
+
+def test_score_finds_day_resubmit_entry_and_records_status():
+    row = {"date": DAY, "symbol": "AAA", "qty": "10"}
+    orders = [{"client_order_id": "gapshort-2026-11-16-AAA", "status": "rejected", "filled_qty": 0, "filled_avg_price": None},
+              {"client_order_id": "gapshort-2026-11-16-AAA-2092001", "status": "filled", "filled_qty": 10, "filled_avg_price": 15.0}]
+    out = gp.score_row(row, orders, {"open": 15.0})
+    assert out["entry_fill"] == 15.0 and out["entry_status"] == "filled"
+    out = gp.score_row(row, [dict(orders[0], status="expired")], {"open": 15.0})
+    assert out["entry_status"] == "expired"

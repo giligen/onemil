@@ -40,9 +40,14 @@ GAPPERS = _REPO / "logs" / "gap_short_gappers.csv"
 PAUSE_FLAG = _REPO / "logs" / "gap_short_pause.flag"
 COLUMNS = ["date", "symbol", "pm_last", "prev_close", "gap_pct", "l1", "qty", "borrow_status", "locate_status",
            "locate_fee_bp", "order_id", "entry_status", "daily_open", "entry_fill", "ask_1030", "cover_limit", "cover_fill",
-           "slip_bp_vs_ask", "net_bp", "pnl_usd", "day_killed", "note"]
+           "slip_bp_vs_ask", "net_bp", "pnl_usd", "day_killed", "note", "entry_tif"]
 GAPPER_COLUMNS = ["date", "symbol", "pm_last", "gap_pct", "l1", "picked", "open", "px_1030", "placebo_net_bp"]
 ENV_KEY, ENV_SEC = "ALPACA_MOM_API_KEY", "ALPACA_MOM_API_SECRET"
+# Entry time-in-force policy (2026-11-16 first paper day): the paper OMS EXPIRED an accepted opg order unfilled (TU), and Alpaca rejects
+# opg on hard-to-borrow assets (42210000). "day" = market DAY order submitted pre-open, queued by Alpaca and executed at the 09:30 open.
+ENTRY_TIF_DEFAULT = "day"   # paper OMS expires opg (2026-11-16 TU); live may switch to "opg" when the auction is real
+ENTRY_TIF_HTB = "day"       # Alpaca 42210000: hard-to-borrow assets accept day orders only
+HTB_REJECT_CODE = "42210000"
 PAPER_LOG = _REPO / "logs" / "gap_short_paper.log"   # cron stdout: --score greps it for the day's PICK line
 
 
@@ -59,8 +64,23 @@ def make_client():
 
 # ---- ledger -----------------------------------------------------------------------------------------------------------
 def read_ledger(path=None) -> list:
-    """Ledger rows as dicts ([] when missing)."""
-    return ll.read_csv(path or LEDGER)
+    """Ledger rows as dicts ([] when missing); rows written before the `entry_tif` column existed read it as ""."""
+    rows = ll.read_csv(path or LEDGER)
+    for r in rows:
+        r.setdefault("entry_tif", "")
+    return rows
+
+
+def ensure_ledger_schema(path=None) -> None:
+    """Rewrite an existing ledger whose header predates COLUMNS (e.g. no `entry_tif`) so appended rows align with the header."""
+    p = Path(path or LEDGER)
+    if not p.exists():
+        return
+    with p.open() as f:
+        header = f.readline().strip().split(",")
+    if header != COLUMNS:
+        logger.warning("ledger %s header is out of date (%d cols, want %d) - migrating in place", p, len(header), len(COLUMNS))
+        write_ledger(read_ledger(p), p)
 
 
 def write_ledger(rows: list, path=None, columns=COLUMNS) -> None:
@@ -111,13 +131,21 @@ class PaperBroker:
                  "filled_qty": float(o.filled_qty or 0),
                  "filled_avg_price": float(o.filled_avg_price) if o.filled_avg_price else None} for o in out]
 
-    def short_opg(self, symbol: str, qty: int, coid: str) -> dict:
-        """Market-on-open sell short (time_in_force=opg)."""
+    def short_at_open(self, symbol: str, qty: int, coid: str, tif: str = "day") -> dict:
+        """Market sell short for the open. tif="opg": market-on-open auction order. tif="day": plain DAY market order submitted
+        pre-open, which Alpaca queues and executes at the 09:30 open (the only form HTB assets accept, code 42210000)."""
         from alpaca.trading.enums import OrderSide, TimeInForce
         from alpaca.trading.requests import MarketOrderRequest
+        if tif not in ("opg", "day"):
+            raise ValueError(f"entry tif must be 'opg' or 'day', got {tif!r}")
         o = self.tc.submit_order(MarketOrderRequest(symbol=symbol, qty=qty, side=OrderSide.SELL,
-                                                    time_in_force=TimeInForce.OPG, client_order_id=coid))
+                                                    time_in_force=TimeInForce.OPG if tif == "opg" else TimeInForce.DAY,
+                                                    client_order_id=coid))
         return {"id": str(o.id), "status": o.status.value}
+
+    def short_opg(self, symbol: str, qty: int, coid: str) -> dict:
+        """Thin alias: market-on-open short (tif="opg")."""
+        return self.short_at_open(symbol, qty, coid, "opg")
 
     def cover_limit(self, symbol: str, qty: int, price: float, coid: str) -> dict:
         """Day limit buy-to-cover."""
@@ -152,6 +180,24 @@ class PaperBroker:
         o = self.tc.get_order_by_id(order_id)
         return {"status": o.status.value, "filled_qty": float(o.filled_qty or 0),
                 "filled_avg_price": float(o.filled_avg_price) if o.filled_avg_price else None}
+
+
+def choose_entry_tif(borrow_status: str) -> str:
+    """Entry time-in-force for one pick: hard-to-borrow -> ENTRY_TIF_HTB, everything else -> ENTRY_TIF_DEFAULT."""
+    return ENTRY_TIF_HTB if borrow_status == "hard_to_borrow" else ENTRY_TIF_DEFAULT
+
+
+def _resubmit_as_day(broker, row: dict, p: dict, day: str, sym: str, err: Exception, t: datetime) -> None:
+    """opg was rejected with 42210000 (HTB): resubmit ONCE as a day order under a NEW unique client id; record the outcome in `row`."""
+    logger.warning("pick: %s opg rejected (%s) - resubmitting once as a day order", sym, err)
+    coid = R.client_order_id_unique(day, sym, "", 2, t.strftime("%H%M%S"))
+    row["entry_tif"] = "day"
+    try:
+        res = broker.short_at_open(sym, p["qty"], coid, "day")
+        row.update(order_id=res["id"], entry_status=res["status"], note="opg rejected 42210000 -> resubmitted as day")
+    except Exception as e2:  # noqa: BLE001 - day resubmit also rejected: keep rejected + broker message
+        row.update(entry_status="rejected", note=str(e2)[:120])
+        logger.warning("pick: day resubmit rejected for %s: %s", sym, e2)
 
 
 # ---- pick ---------------------------------------------------------------------------------------------------------------
@@ -272,12 +318,18 @@ def run_pick(dry_run: bool, client=None, broker=None, session=None, universe=Non
             late = True                      # every remaining pick gets its own not_submitted row (parity reason opg_deadline)
             row.update(entry_status="not_submitted", note="opg deadline")
         elif not dry_run:
+            tif = choose_entry_tif(bs)
+            logger.info("pick: %s entry tif=%s (borrow_status=%s)", sym, tif, bs)
+            row["entry_tif"] = tif
             try:
-                res = broker.short_opg(sym, p["qty"], R.client_order_id(day, sym))
+                res = broker.short_at_open(sym, p["qty"], R.client_order_id(day, sym), tif)
                 row.update(order_id=res["id"], entry_status=res["status"])
-            except Exception as e:  # noqa: BLE001 - paper may reject HTB shorts; log, no retry
-                row.update(entry_status="rejected", note=str(e)[:120])
-                logger.warning("pick: order rejected for %s: %s", sym, e)
+            except Exception as e:  # noqa: BLE001 - broker may reject; log
+                if tif == "opg" and HTB_REJECT_CODE in str(e):
+                    _resubmit_as_day(broker, row, p, day, sym, e, clock())
+                else:
+                    row.update(entry_status="rejected", note=str(e)[:120])
+                    logger.warning("pick: order rejected for %s: %s", sym, e)
         rows.append(row)
     if late:
         logger.warning("OPG deadline passed, %d names not submitted", sum(1 for r in rows if r.get("entry_status") == "not_submitted"))
@@ -292,6 +344,7 @@ def run_pick(dry_run: bool, client=None, broker=None, session=None, universe=Non
         print({k: r.get(k, "") for k in ("date", "symbol", "gap_pct", "l1", "qty", "borrow_status", "locate_status", "entry_status", "note")})
     if dry_run:
         return 0
+    ensure_ledger_schema()
     logger.info("ledger rows appended: %d", ll.append_rows(LEDGER, rows, COLUMNS))
     ll.append_rows(GAPPERS, log_gap, GAPPER_COLUMNS)
     return 0
@@ -514,13 +567,22 @@ def run_flatten(dry_run: bool, client=None, broker=None, now=None) -> int:
 
 
 # ---- score / weekly ---------------------------------------------------------------------------------------------------------
+def entry_order(orders: list, day: str, sym: str):
+    """The entry order for (day, sym): the base client id or its `-2HHMMSS` day resubmit; a filled one wins, else the latest listed."""
+    base = R.client_order_id(day, sym)
+    cands = [o for o in orders if o["client_order_id"] == base or o["client_order_id"].startswith(base + "-")]
+    return next((o for o in cands if o.get("filled_avg_price")), cands[-1] if cands else None)
+
+
 def score_row(row: dict, orders: list, snap: dict) -> dict:
     """Fill a ledger row's fills / slippage / net from broker orders and the day's snapshot (partial-fill aware: P&L uses the
     ENTRY order's filled_qty and the COVERED qty, not the ledger qty)."""
     day, sym = row["date"], row["symbol"]
-    ent = next((o for o in orders if o["client_order_id"] == R.client_order_id(day, sym)), None)
+    ent = entry_order(orders, day, sym)
     covs = cover_orders(orders, day, sym)
     out = {"daily_open": (snap or {}).get("open") or ""}
+    if ent and ent.get("status"):
+        out["entry_status"] = ent["status"]          # accepted -> filled / expired / canceled, so parity can name the reason
     if not ent or not ent["filled_avg_price"]:
         out["note"] = (row.get("note") or "") or "no entry fill"
         return out

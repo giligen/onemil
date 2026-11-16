@@ -33,8 +33,8 @@ from trading import gap_short_rules as R  # noqa: E402
 
 logger = logging.getLogger("gap_short_parity")
 PARITY_CSV = _REPO / "logs" / "gap_short_parity.csv"
-COLUMNS = ["date", "symbol", "side", "reason", "bt_open", "bt_ask_1030", "bt_net_bp", "live_net_bp", "entry_slip_bp", "exit_slip_bp", "net_diff_bp"]
-REASONS = ("opg_deadline", "rejected_htb", "rejected_ssr", "existing_position", "qty_floor", "pause_flag", "universe_diff", "unexplained", "api_error")
+COLUMNS = ["date", "symbol", "side", "reason", "bt_open", "bt_ask_1030", "bt_net_bp", "live_net_bp", "entry_slip_bp", "exit_slip_bp", "net_diff_bp", "detail"]
+REASONS = ("entry_not_filled", "entry_day_vs_open", "opg_deadline", "rejected_htb", "rejected_ssr", "existing_position", "qty_floor", "pause_flag", "universe_diff", "unexplained", "api_error")
 
 
 def classify_bt_only(symbol: str, ledger_row, ctx: dict) -> str:
@@ -52,6 +52,8 @@ def classify_bt_only(symbol: str, ledger_row, ctx: dict) -> str:
                 return "rejected_ssr"
             if any(k in note for k in ("borrow", "short", "locate", "htb")):
                 return "rejected_htb"
+        if status in ("rejected", "expired", "canceled", "cancelled"):
+            return "entry_not_filled"
         return "unexplained"
     if ctx.get("pause_active"):
         return "pause_flag"
@@ -75,6 +77,9 @@ def compare(day: str, bt: list, ledger_rows: list, ctx: dict) -> list:
             row.update(side="matched", reason="", live_net_bp=lr.get("net_bp", ""))
             if lr.get("entry_fill") not in ("", None) and b["open"]:
                 row["entry_slip_bp"] = round((b["open"] - float(lr["entry_fill"])) / b["open"] * 1e4, 1)
+                if lr.get("entry_tif") == "day" and abs(row["entry_slip_bp"]) >= 1.0:
+                    row["reason"] = "entry_day_vs_open"      # a DAY order fills at the first print, not the auction open
+                    row["detail"] = f"day entry filled {row['entry_slip_bp']:+.1f} bp vs open (positive = fill below open)"
             if lr.get("cover_fill") not in ("", None) and b["ask"]:
                 row["exit_slip_bp"] = round((float(lr["cover_fill"]) / b["ask"] - 1) * 1e4, 1)
             if f(row["live_net_bp"]) != "" and row["bt_net_bp"] != "":
@@ -83,6 +88,8 @@ def compare(day: str, bt: list, ledger_rows: list, ctx: dict) -> list:
             row.update(side="matched", reason="")          # picked + ordered, fill not yet scored
         else:
             row.update(side="bt_only", reason=classify_bt_only(b["symbol"], lr, dict(ctx, open_price=b["open"])))
+            if row["reason"] == "entry_not_filled":
+                row["detail"] = f"entry_status={lr.get('entry_status')}"
         out.append(row)
     for sym, lr in live.items():
         if sym not in bt_syms:
