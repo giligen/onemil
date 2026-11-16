@@ -96,3 +96,27 @@ class TestLoadJournal:
             obs.journal_lines("b")
             assert run.call_count == 1
         assert obs._JOURNAL["ok"] is True
+
+
+class TestLiveScoredSymbols:
+    """2026-11-16: GDXD/MOVE were phantom-gap rejected at scoring (real gap < 5 %) and the observer alarmed REAL DROP."""
+
+    @staticmethod
+    def _journal(lines):
+        def journal_lines(key):
+            return [l for l in lines if key in l]
+        return journal_lines
+
+    def test_phantom_gap_reject_counts_as_scored(self):
+        j = self._journal([
+            "x | ORB SCORED: AAA comp=0.5",
+            "x | ORB: BBB below filter threshold 0.1",
+            "x | ORB: GDXD phantom-gap reject (production) — real gap 4.76% < 5.0% (snapshot universe was satisfied via phantom snap.open)",
+            "x | ORB: MOVE phantom-gap reject (production) — real gap 3.58% < 5.0% (snapshot universe was satisfied via phantom snap.open)",
+            "x | ORB: CCC range complete — H=1 L=0",
+        ])
+        assert obs.live_scored_symbols(j, {"PPP"}) == ["AAA", "BBB", "GDXD", "MOVE", "PPP"]
+
+    def test_range_complete_alone_is_not_scored(self):
+        j = self._journal(["x | ORB: CCC range complete — H=1 L=0"])
+        assert obs.live_scored_symbols(j) == []

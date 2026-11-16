@@ -266,6 +266,20 @@ def send_verdict(n, verdict, audit, kept, live_scored, real_drops, drop_class,
     return False
 
 
+
+def live_scored_symbols(journal_lines, preplace=frozenset()) -> list:
+    """Symbols the live engine EVALUATED at scoring time, from the journal: 'ORB SCORED: X' (ranked),
+    'ORB: X below filter threshold' (composite reject, 2026-07-13), 'ORB: X phantom-gap reject (...)' (the
+    2026-05-08 scoring-time gap re-check: the snapshot open satisfied the universe gap but the REAL 09:30 gap is
+    below the floor — a deliberate engine rule with BT parity, 2026-11-16 GDXD/MOVE false 'REAL DROP'), plus the
+    preplaced set. A name here was judged and must never be reported as dropped-by-live."""
+    def _sym_after(prefix, key):
+        return {l.split(prefix)[1].split()[0] for l in journal_lines(key) if prefix in l}
+    return sorted(_sym_after('ORB SCORED: ', 'ORB SCORED')
+                  | _sym_after('ORB: ', 'below filter threshold')
+                  | _sym_after('ORB: ', 'phantom-gap reject')
+                  | set(preplace))
+
 def run_pick_parity(day, parity_fn=None):
     """Pick-level parity for `day` (today: the BT side is usually unavailable at 09:36 ET - the nightly features build
     runs after the close) AND the previous session (whose BT rows exist by now). Returns the dict stored under the
@@ -347,13 +361,7 @@ def main():
     # instead of "ORB SCORED: X" — they WERE scored (correct rejection).
     # The old parser counted them as dropped and false-alarmed
     # "CAUGHT 10 dropped" on 7/13 (8 of the 10 were threshold rejects).
-    live_scored = sorted(
-        {l.split('ORB SCORED: ')[1].split()[0]
-         for l in journal_lines('ORB SCORED')}
-        | {l.split('ORB: ')[1].split()[0]
-           for l in journal_lines('below filter threshold')
-           if 'ORB: ' in l}
-        | preplace)
+    live_scored = live_scored_symbols(journal_lines, preplace)
     # docs/orb_dry_run_spec_20260925.md: a dry-run week never emits 'ORB
     # ENTRY SUBMITTED' (no order is placed), so the parity observer must
     # also count '[ORB DRY] WOULD BUY <sym> ...' lines as picks, or every
