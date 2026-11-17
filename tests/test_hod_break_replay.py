@@ -203,11 +203,22 @@ def test_drain_thread_evaluates_without_the_scan_cycle(streamed_world, monkeypat
     import time
     e, alp, sm, state = streamed_world
     monkeypatch.setattr(HodBreakEngine, 'SETTLE_S', 0.02)    # production default 0.4 s; the batching logic is unchanged
+    done = []                                                   # one entry per drain batch FULLY evaluated
+    orig_ingest = e._ingest_batch
+    monkeypatch.setattr(e, '_ingest_batch', lambda items: (lambda r: (done.append(1), r)[1])(orig_ingest(items)))
     with patch.object(HodBreakEngine, '_minute_of_day', side_effect=lambda: 570 + state['now']):
         e._roll_session(); e.start_drain_thread()
         try:
             for t in range(1, len(DAY['ZZTA']) + 1):
-                state['now'] = t; e._on_bar_close('ZZTA', df_of(DAY['ZZTA'], 0, t)); time.sleep(0.06)   # one bar per 'minute': the drain batches a minute's bars for 0.4 s
+                n_before = len(done)
+                state['now'] = t; e._on_bar_close('ZZTA', df_of(DAY['ZZTA'], 0, t))
+                # One bar per 'minute': wait until the drain has ingested AND EVALUATED this bar before the clock moves
+                # to the next minute (2026-11-17 pre-boot run under the 11:30 UTC daily-bars build: a fixed 0.06 s
+                # sleep let the clock advance while bar t was still being evaluated / let two minutes batch together
+                # on a loaded box -> the breakout minute was judged at minute t+1 -> flaky failure).
+                for _ in range(500):
+                    if len(done) > n_before and e._bar_queue.empty(): break
+                    time.sleep(0.01)
             for _ in range(100):
                 if alp.submit_bracket_order.called: break
                 time.sleep(0.05)
