@@ -306,7 +306,8 @@ def run_pick(dry_run: bool, client=None, broker=None, session=None, universe=Non
                             "l1": round(c["l1"]), "picked": int(c["symbol"] in picked)})
     for p in picks:
         sym = p["symbol"]
-        bs = ll.fetch_borrow_status(session, sym)
+        flags = ll.fetch_asset_flags(session, sym)
+        bs = flags["borrow_status"]
         loc = locs.get(sym, {"locate_status": "error", "fee_per_share": ""})
         fee = loc.get("fee_per_share", "")
         fee_bp = fee / p["pm_last"] * 1e4 if fee != "" else ""
@@ -316,6 +317,8 @@ def run_pick(dry_run: bool, client=None, broker=None, session=None, universe=Non
         skip = None
         if loc["locate_status"] == "threshold" or bs == "threshold_security":
             skip = "threshold-list"
+        elif flags["shortable"] is False:    # None (unknown/error) must not skip: the broker decides
+            skip = "not shortable (asset.shortable=false)"
         elif sym in held or sym in existing:
             skip = "existing position/order"
         if skip:

@@ -628,3 +628,36 @@ def test_universe_refuses_when_previous_session_bar_missing(tmp_path, caplog):
     con.commit(); con.close()
     assert gp.load_universe(db, "2026-11-16") == {}
     assert any("no rows for the previous session 2026-11-13" in r.message for r in caplog.records if r.levelname == "ERROR")
+
+
+def _flags_session(**flags):
+    """Session whose /v2/assets answers the given asset flags (locate quotes as in _session)."""
+    s = _session()
+    s.get.return_value.json.return_value = dict(s.get.return_value.json.return_value, **flags)
+    return s
+
+
+def test_pick_not_shortable_skips_without_submit_or_error(paths, caplog):
+    broker = _broker()
+    gp.run_pick(False, _client(SNAPS, {"AAA": _bars(9e6)}), broker,
+                _flags_session(borrow_status="hard_to_borrow", shortable=False), UNI, NOW)
+    broker.short_at_open.assert_not_called()
+    row = gp.read_ledger()[0]
+    assert row["entry_status"] == "skipped" and "not shortable" in row["note"]
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+def test_pick_shortable_unknown_still_submits(paths):
+    broker = _broker()
+    gp.run_pick(False, _client(SNAPS, {"AAA": _bars(9e6)}), broker, _flags_session(borrow_status="hard_to_borrow"), UNI, NOW)
+    assert broker.short_at_open.call_count == 1
+
+
+def test_fetch_asset_flags_parses_200_and_error_dict_on_500(caplog):
+    ll = gp.ll
+    s = _flags_session(borrow_status="hard_to_borrow", shortable=False, easy_to_borrow=False)
+    assert ll.fetch_asset_flags(s, "LITX") == {"borrow_status": "hard_to_borrow", "shortable": False, "easy_to_borrow": False}
+    s.get.return_value.status_code = 500
+    with caplog.at_level("ERROR"):
+        assert ll.fetch_asset_flags(s, "LITX") == {"borrow_status": "error", "shortable": None, "easy_to_borrow": None}
+    assert any(r.levelname == "ERROR" for r in caplog.records)

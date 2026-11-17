@@ -16,6 +16,7 @@ CTX = {"pause_active": False, "universe": {"AAA", "BBB"}, "open_price": 10.0}
     ({"entry_status": "not_submitted", "note": "opg deadline"}, {}, "opg_deadline"),
     ({"entry_status": "skipped", "note": "existing position/order"}, {}, "existing_position"),
     ({"entry_status": "rejected", "note": "asset cannot be sold short"}, {}, "rejected_htb"),
+    ({"entry_status": "skipped", "note": "not shortable (asset.shortable=false)"}, {}, "not_shortable"),
     ({"entry_status": "rejected", "note": "SSR restriction in effect"}, {}, "rejected_ssr"),
     ({"entry_status": "rejected", "note": "???"}, {}, "entry_not_filled"),
     ({"entry_status": "expired", "note": ""}, {}, "entry_not_filled"),

@@ -128,16 +128,23 @@ def fetch_locates(session, symbols: list) -> dict:
     return out
 
 
-def fetch_borrow_status(session, symbol: str) -> str:
-    """borrow_status from GET /v2/assets/{symbol}; 'error' (+ERROR log) on any failure."""
+def fetch_asset_flags(session, symbol: str) -> dict:
+    """One GET /v2/assets/{symbol} -> {borrow_status, shortable, easy_to_borrow}; error dict (+ERROR log) on any failure."""
     try:
         r = session.get(f"{BASE_URL}/v2/assets/{symbol}", timeout=15)
         if r.status_code != 200:
             raise RuntimeError(f"HTTP {r.status_code}")
-        return r.json().get("borrow_status") or "unknown"
+        body = r.json()
+        return {"borrow_status": body.get("borrow_status") or "unknown", "shortable": body.get("shortable"),
+                "easy_to_borrow": body.get("easy_to_borrow")}
     except Exception as e:  # noqa: BLE001
         logger.error("asset borrow_status failed for %s: %s", symbol, e)
-        return "error"
+        return {"borrow_status": "error", "shortable": None, "easy_to_borrow": None}
+
+
+def fetch_borrow_status(session, symbol: str) -> str:
+    """borrow_status from GET /v2/assets/{symbol}; 'error' (+ERROR log) on any failure."""
+    return fetch_asset_flags(session, symbol)["borrow_status"]
 
 
 def build_row(date: str, time_utc: str, g: dict, borrow_status: str, loc: dict) -> dict:

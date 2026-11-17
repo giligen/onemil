@@ -34,7 +34,7 @@ from trading import gap_short_rules as R  # noqa: E402
 logger = logging.getLogger("gap_short_parity")
 PARITY_CSV = _REPO / "logs" / "gap_short_parity.csv"
 COLUMNS = ["date", "symbol", "side", "reason", "bt_open", "bt_ask_1030", "bt_net_bp", "live_net_bp", "entry_slip_bp", "exit_slip_bp", "net_diff_bp", "detail"]
-REASONS = ("entry_not_filled", "entry_day_vs_open", "opg_deadline", "rejected_htb", "rejected_ssr", "existing_position", "qty_floor", "pause_flag", "universe_diff", "unexplained", "api_error")
+REASONS = ("entry_not_filled", "entry_day_vs_open", "opg_deadline", "rejected_htb", "not_shortable", "rejected_ssr", "existing_position", "qty_floor", "pause_flag", "universe_diff", "unexplained", "api_error")
 
 
 def classify_bt_only(symbol: str, ledger_row, ctx: dict) -> str:
@@ -45,6 +45,8 @@ def classify_bt_only(symbol: str, ledger_row, ctx: dict) -> str:
             return "opg_deadline"
         if "existing" in note:
             return "existing_position"
+        if "not shortable" in note:
+            return "not_shortable"
         if "threshold" in note:
             return "rejected_htb"
         if status == "rejected":
