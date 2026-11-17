@@ -23,7 +23,7 @@ re-arm it verbatim and update the id here. The daily EOD report is a durable cro
 | `58 22 * * 1-5` | UTC | `bf_decision_parity.py` (BT-only record while BF is paused, no freeze) | `logs/bf_parity/cron.log` | 22:45 BF cache |
 | `0 20 * * 0` | UTC | `orb_weekly_refit.py` (alerts on failure) | `logs/orb_weekly_refit.log` | before Monday's boot |
 | `0 23 * * 1-5` | UTC | `build_hod_volume_profile.py` | `logs/hod_volume_profile.log` | nightly bar refresh |
-| `27 11 * * 1-5` | UTC | pre-boot full pytest, alert on failure | `logs/preboot_tests.log` | clean tree before 12:30 |
+| `8 11 * * 1-5` | UTC | pre-boot full pytest (moved 11/17 off the 11:30 daily-bars build), alert on failure | `logs/preboot_tests.log` | clean tree before 12:30 |
 | `45,58 19,20 * * 1-5` | UTC | `tom_sleeve.py` | `logs/tom_sleeve_cron.log` | — |
 | `@reboot` (sleep 20 / 30) | UTC | tmux Claude sessions `prod-onemil` / stupid-money `attach.sh` | `logs/claude_tmux.log` | — |
 | `50 11 * * 1-3` | UTC | `momentum_sleeve.py` prefetch + dry run | `logs/momentum_sleeve.log` | — |
