@@ -96,3 +96,60 @@ def test_expired_entry_and_day_fill_vs_open_reasons():
     assert by["AAA"]["side"] == "bt_only" and by["AAA"]["reason"] == "entry_not_filled" and "expired" in by["AAA"]["detail"]
     assert by["BBB"]["side"] == "matched" and by["BBB"]["reason"] == "entry_day_vs_open" and by["BBB"]["entry_slip_bp"] == 15.0
     assert "15.0 bp" in by["BBB"]["detail"] and by["BBB"]["reason"] in gpar.REASONS
+
+
+SPAI = {"symbol": "SPAI", "open": 3.01, "ask": 3.0, "net": -7.5, "prev_close": 2.47, "pm_last_0919": 2.97, "l1_0919": 17_552_563.0}
+
+
+@pytest.mark.parametrize("cand,lg,want", [
+    (SPAI, None, "price_gate_live"),                                                                  # 2026-11-17: $2.97 at 09:19 < $3 floor
+    (dict(SPAI, pm_last_0919=10.2, prev_close=10.0), None, "gap_gate_live"),
+    (dict(SPAI, pm_last_0919=None, l1_0919=None), None, "gap_gate_live"),                             # no pre-market print
+    (dict(SPAI, pm_last_0919=11.0, prev_close=10.0, l1_0919=1e6), None, "l1_gate_live"),
+    (dict(SPAI, pm_last_0919=11.0, prev_close=10.0), {"SPAI": {"picked": "0", "l1": "17552563", "gap_pct": "10"}}, "rank_displaced_live"),
+    (dict(SPAI, pm_last_0919=11.0, prev_close=10.0), {"SPAI": {"picked": "0", "l1": "100"}}, "l1_gate_live"),
+    (dict(SPAI, pm_last_0919=11.0, prev_close=10.0), None, "unexplained"),                            # passed every live gate, still absent
+    ({"symbol": "SPAI", "open": 3.01}, {"SPAI": {"picked": "0", "l1": "100"}}, "l1_gate_live"),        # no 09:19 fields, live log says L1 short
+    ({"symbol": "SPAI", "open": 3.01}, {"SPAI": {"picked": "1", "l1": "9000000"}}, "unexplained"),     # picked live but no ledger row = defect
+    ({"symbol": "SPAI", "open": 3.01}, None, "unexplained"),
+])
+def test_live_gate_classifier(cand, lg, want):
+    ctx = dict(CTX, universe={"SPAI"}, open_price=cand["open"], bt_cand=cand, live_gappers=lg)
+    got = gpar.classify_bt_only("SPAI", None, ctx)
+    assert got == want and got in gpar.REASONS
+
+
+def test_spai_price_gate_day_is_explained_not_error():
+    """2026-11-17 shape: BT picked SPAI off the 3.01 open, live saw 2.97 at 09:19 (below the $3 floor) -> no ledger row."""
+    rows = gpar.compare(D, [SPAI], [], dict(CTX, universe={"SPAI"}, live_gappers={"COHX": {"picked": "0"}}))
+    assert rows[0]["side"] == "bt_only" and rows[0]["reason"] == "price_gate_live"
+    assert "2.97" in rows[0]["detail"] and "3.01" in rows[0]["detail"]
+    line = gpar.summary_line(D, rows)
+    assert "unexplained 0" in line and "ERROR" not in line
+
+
+def test_rank_displaced_detail_and_unexplained_detail_blank():
+    cand = dict(SPAI, pm_last_0919=11.0, prev_close=10.0)
+    rows = gpar.compare(D, [cand], [], dict(CTX, universe={"SPAI"}, live_gappers={"SPAI": {"picked": "0", "l1": "17552563", "gap_pct": "10.0"}}))
+    assert rows[0]["reason"] == "rank_displaced_live" and "top-10" in rows[0]["detail"]
+    rows = gpar.compare(D, [cand], [], dict(CTX, universe={"SPAI"}, live_gappers=None))
+    assert rows[0]["reason"] == "unexplained" and rows[0].get("detail", "") == ""
+
+
+def test_bt_picks_carries_the_live_0919_view(monkeypatch):
+    """bt_picks adds prev_close / pm_last_0919 / l1_0919 from the same 1-min bars (bars starting at/after 09:20 ET excluded)."""
+    from unittest.mock import MagicMock
+    import pandas as pd
+    from data_sources.alpaca_client import AlpacaClient
+    c = MagicMock(spec=AlpacaClient)
+    c.get_snapshots.return_value = {"SPAI": {"open": 3.01, "prev_close": 2.47, "daily_bar_date": D}}
+    # 09:17, 09:18, 09:19, 09:25 ET: L1 counts bars that END by 09:19 (09:17, 09:18); pm_last is the last bar starting before 09:20
+    ts = pd.to_datetime(["2026-11-16 14:17", "2026-11-16 14:18", "2026-11-16 14:19", "2026-11-16 14:25"], utc=True)
+    c.get_historical_1min_bars.return_value = pd.DataFrame({"timestamp": ts, "close": [2.95, 2.96, 2.97, 3.0],
+                                                            "volume": [1_000_000, 2_000_000, 500, 5_000_000]})
+    monkeypatch.setattr(gpar, "fetch_ask_1030", lambda headers, sym, day: 3.0)
+    out = gpar.bt_picks(D, c, {"SPAI": 2.47}, {})
+    assert len(out) == 1 and out[0]["symbol"] == "SPAI" and out[0]["prev_close"] == 2.47
+    assert out[0]["pm_last_0919"] == 2.97 and out[0]["l1_0919"] == 2.95 * 1_000_000 + 2.96 * 2_000_000
+    from datetime import datetime
+    assert gpar.live_window_fields([], datetime(2026, 11, 16, tzinfo=gp.R.ET)) == {"pm_last_0919": None, "l1_0919": None}

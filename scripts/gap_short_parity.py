@@ -7,7 +7,11 @@ exit -> BT picks + per-name BT net bp (rules in trading/gap_short_rules.py).  (2
 bt_only / live_only each with a REASON from REASONS, per-matched-name slippage and net diff.  (3) Runs on 0-live-pick days too (shadow).
 (4) ONE Telegram line `[GAPSHORT PARITY]`; ERROR (logger.error) only if unexplained > 0 or an API failure.  Rows -> logs/gap_short_parity.csv
 (idempotent per date; Telegram only on the first write of a date).  Live-only names are `universe_diff` by construction: live ranks on the
-09:20 pre-market last, the BT on the official open.
+09:20 pre-market last, the BT on the official open.  A BT pick with NO live ledger row is explained by construction when it
+failed a live gate at 09:19 ET (`price_gate_live`, `gap_gate_live`, `l1_gate_live`: the live rule reads the 09:19 pre-market last
+and the 04:00-09:19 L1, the BT the official 09:30 open - 2026-11-17 SPAI: $2.97 at 09:19 < the $3 floor, open 3.01) or passed them
+but fell outside the live top-10 / gross cap (`rank_displaced_live`).  `unexplained` (ERROR) is kept for a name that passed every
+live gate and still has no ledger row.
 """
 from __future__ import annotations
 
@@ -34,11 +38,56 @@ from trading import gap_short_rules as R  # noqa: E402
 logger = logging.getLogger("gap_short_parity")
 PARITY_CSV = _REPO / "logs" / "gap_short_parity.csv"
 COLUMNS = ["date", "symbol", "side", "reason", "bt_open", "bt_ask_1030", "bt_net_bp", "live_net_bp", "entry_slip_bp", "exit_slip_bp", "net_diff_bp", "detail"]
-REASONS = ("entry_not_filled", "entry_day_vs_open", "opg_deadline", "rejected_htb", "not_shortable", "rejected_ssr", "existing_position", "qty_floor", "pause_flag", "universe_diff", "unexplained", "api_error")
+REASONS = ("entry_not_filled", "entry_day_vs_open", "opg_deadline", "rejected_htb", "not_shortable", "rejected_ssr", "existing_position", "qty_floor", "pause_flag", "universe_diff", "price_gate_live", "gap_gate_live", "l1_gate_live", "rank_displaced_live", "unexplained", "api_error")
+
+
+def _pct(g) -> str:
+    """Gap fraction as '+12.3 %' ('n/a' for None)."""
+    return "n/a" if g is None else f"{g * 100:+.1f} %"
+
+
+def live_gate_reason(cand: dict) -> tuple | None:
+    """(reason, detail) when a BT pick would have FAILED a live gate at 09:19 ET, else None.
+
+    The live rule (gap_short_paper.build_candidates) reads the pre-market last at 09:19 for the price band and the gap, and
+    L1 over 04:00-09:19; the BT reads the official 09:30 open.  `cand` carries `pm_last_0919`, `l1_0919`, `prev_close`, `open`
+    from bt_picks; a dict without `pm_last_0919` (older callers, tests) yields None.
+    """
+    if "pm_last_0919" not in cand:
+        return None
+    pm, prev, l1, op = cand.get("pm_last_0919"), cand.get("prev_close"), cand.get("l1_0919"), cand.get("open")
+    if pm is None:
+        return "gap_gate_live", f"no pre-market print before 09:20 ET (live needs a today's pre-market trade); BT 09:30 open {op}"
+    if not R.price_ok(pm):
+        return "price_gate_live", f"09:19 pre-market last {pm} outside [${R.PRICE_LO:g}, ${R.PRICE_HI:g}] (BT 09:30 open {op} passes)"
+    g, bt_g = R.gap_fraction(pm, prev), R.gap_fraction(op, prev)
+    if g is None or not (R.GAP_MIN <= g <= R.GAP_MAX):
+        return "gap_gate_live", f"09:19 gap {_pct(g)} outside [{R.GAP_MIN * 100:g} %, {R.GAP_MAX * 100:g} %] (BT 09:30-open gap {_pct(bt_g)})"
+    if l1 is None or l1 < R.L1_MIN_USD:
+        return "l1_gate_live", f"09:19 L1 ${(l1 or 0):,.0f} < ${R.L1_MIN_USD:,.0f}"
+    return None
+
+
+def bt_only_detail(symbol: str, reason: str, ctx: dict) -> str:
+    """Measured numbers behind a by-construction bt_only reason ('' for the other reasons)."""
+    hit = live_gate_reason(ctx.get("bt_cand") or {})
+    if hit and hit[0] == reason:
+        return hit[1]
+    lg = (ctx.get("live_gappers") or {}).get(symbol) or {}
+    if reason == "rank_displaced_live":
+        return (f"passed the live gates at 09:19 (gap {lg.get('gap_pct', '?')} %, L1 ${float(lg.get('l1') or 0):,.0f}) "
+                f"but outside the live top-{R.TOP_K} / gross cap")
+    if reason == "l1_gate_live" and lg:
+        return f"live L1 ${float(lg.get('l1') or 0):,.0f} at 09:19 < ${R.L1_MIN_USD:,.0f}"
+    return ""
 
 
 def classify_bt_only(symbol: str, ledger_row, ctx: dict) -> str:
-    """Reason a BT pick was not (successfully) a live pick. ctx: pause_active, universe (set), open_price."""
+    """Reason a BT pick was not (successfully) a live pick.
+
+    ctx: pause_active, universe (set), open_price, bt_cand (the BT pick dict incl. its 09:19 view, see live_gate_reason),
+    live_gappers ({symbol: row of logs/gap_short_gappers.csv for the day}, None when the pick wrote no rows that day).
+    """
     if ledger_row is not None:
         status, note = (ledger_row.get("entry_status") or ""), (ledger_row.get("note") or "").lower()
         if status == "not_submitted" or "opg" in note:
@@ -63,6 +112,13 @@ def classify_bt_only(symbol: str, ledger_row, ctx: dict) -> str:
         return "qty_floor"
     if symbol not in ctx.get("universe", set()):
         return "universe_diff"
+    hit = live_gate_reason(ctx.get("bt_cand") or {})
+    if hit:
+        return hit[0]
+    lg = ctx.get("live_gappers")
+    if lg is not None and symbol in lg and not int(lg[symbol].get("picked") or 0):
+        l1 = lg[symbol].get("l1")
+        return "l1_gate_live" if l1 in ("", None) or float(l1) < R.L1_MIN_USD else "rank_displaced_live"
     return "unexplained"
 
 
@@ -89,9 +145,12 @@ def compare(day: str, bt: list, ledger_rows: list, ctx: dict) -> list:
         elif lr is not None and lr.get("entry_status") in ("accepted", "new", "filled", "") and lr.get("order_id"):
             row.update(side="matched", reason="")          # picked + ordered, fill not yet scored
         else:
-            row.update(side="bt_only", reason=classify_bt_only(b["symbol"], lr, dict(ctx, open_price=b["open"])))
+            cctx = dict(ctx, open_price=b["open"], bt_cand=b)
+            row.update(side="bt_only", reason=classify_bt_only(b["symbol"], lr, cctx))
             if row["reason"] == "entry_not_filled":
                 row["detail"] = f"entry_status={lr.get('entry_status')}"
+            elif lr is None:
+                row["detail"] = bt_only_detail(b["symbol"], row["reason"], cctx)
         out.append(row)
     for sym, lr in live.items():
         if sym not in bt_syms:
@@ -136,8 +195,19 @@ def fetch_ask_1030(headers: dict, symbol: str, day: str):
     return float(q[0]["ap"]) if q and q[0].get("ap") else None
 
 
+def live_window_fields(bars: list, day_et: datetime) -> dict:
+    """{pm_last_0919, l1_0919}: the live pick's view at 09:19 ET from the same 1-min bars (bars starting before 09:20 ET only)."""
+    cutoff = day_et.replace(hour=R.PM_END_HM[0], minute=R.PM_END_HM[1] + 1)
+    pm = [b for b in bars if b["t"].astimezone(R.ET) < cutoff]
+    return {"pm_last_0919": float(pm[-1]["c"]) if pm else None, "l1_0919": R.premarket_dollar_volume(pm) if pm else None}
+
+
 def bt_picks(day: str, client, universe: dict, headers: dict) -> list:
-    """BT rule for `day`: gap = daily open / prev close - 1 (snapshots), top-10 by gap, L1 (04:00-09:19 bars) >= cutoff, ask at 10:30."""
+    """BT rule for `day`: gap = daily open / prev close - 1 (snapshots), top-10 by gap, L1 (04:00-09:19 bars) >= cutoff, ask at 10:30.
+
+    Each pick also carries `prev_close` and its live 09:19 view (`pm_last_0919`, `l1_0919`) so the parity can explain a missing
+    live row by the gate it failed (live_gate_reason).
+    """
     snaps = client.get_snapshots(list(universe))
     if not snaps:
         raise RuntimeError("snapshots empty")
@@ -150,16 +220,19 @@ def bt_picks(day: str, client, universe: dict, headers: dict) -> list:
             logger.warning("parity: snapshot prev_close missing for %s - falling back to daily_bars close %s", sym, universe[sym])
         g = R.gap_fraction(s.get("open"), s.get("prev_close") or universe[sym])
         if g is not None and R.GAP_MIN <= g <= R.GAP_MAX and R.price_ok(s.get("open")) and not R.is_excluded_symbol(sym):
-            cands.append({"symbol": sym, "gap": g, "open": s["open"], "l1": None})
+            cands.append({"symbol": sym, "gap": g, "open": s["open"], "l1": None, "prev_close": s.get("prev_close") or universe[sym]})
     cands.sort(key=lambda c: (-c["gap"], c["symbol"]))
     d = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=R.ET)
     for c in cands[:R.TOP_K]:
         df = client.get_historical_1min_bars(c["symbol"], d.replace(hour=4), d.replace(hour=9, minute=30))
-        c["l1"] = R.premarket_dollar_volume({"t": r.timestamp.to_pydatetime(), "c": r.close, "v": r.volume} for r in df.itertuples()) if df is not None and len(df) else None
+        bars = [{"t": r.timestamp.to_pydatetime(), "c": r.close, "v": r.volume} for r in df.itertuples()] if df is not None and len(df) else []
+        c["l1"] = R.premarket_dollar_volume(bars) if bars else None
+        c.update(live_window_fields(bars, d))
     out = []
     for c in R.select_picks(cands):
         ask = fetch_ask_1030(headers, c["symbol"], day)
-        out.append({"symbol": c["symbol"], "open": c["open"], "ask": ask, "net": round(R.net_bp(c["open"], ask), 1) if ask else None})
+        out.append({"symbol": c["symbol"], "open": c["open"], "ask": ask, "net": round(R.net_bp(c["open"], ask), 1) if ask else None,
+                    "prev_close": c["prev_close"], "pm_last_0919": c.get("pm_last_0919"), "l1_0919": c.get("l1_0919")})
     return out
 
 
@@ -185,7 +258,8 @@ def run_parity(dry_run: bool, now=None, client=None, universe=None, headers=None
         bt = bt_picks(day, client, universe, headers)
     except Exception as e:  # noqa: BLE001 - reported in the line + logger.error
         api_error = str(e)[:100]
-    ctx = {"pause_active": gp.PAUSE_FLAG.exists(), "universe": set(universe or [])}
+    lg = {r["symbol"]: r for r in ll.read_csv(gp.GAPPERS) if r.get("date") == day}   # the live pick's 09:19 gapper list
+    ctx = {"pause_active": gp.PAUSE_FLAG.exists(), "universe": set(universe or []), "live_gappers": lg or None}
     if api_error:      # no BT picks to compare: never fabricate universe_diff rows for every live name
         rows = [{"date": day, "symbol": "-", "side": "none", "reason": "api_error"}]
     else:
