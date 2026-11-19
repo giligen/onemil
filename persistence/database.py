@@ -13,6 +13,8 @@ import json
 import os
 import sqlite3
 import logging
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta, date as _date
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
@@ -152,6 +154,9 @@ class Database:
         # Legacy alias — some code accesses self.conn directly (e.g., batch_backtest)
         self.conn = self._cache_conn
 
+        # Serializes every write transaction on the shared connections (see _write).
+        self._write_lock = threading.RLock()
+
         self._create_tables()
         self._migrate()
 
@@ -174,6 +179,25 @@ class Database:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @contextmanager
+    def _write(self, conn: sqlite3.Connection):
+        """Serialize one write transaction on a shared connection.
+
+        Holds `_write_lock` from the first statement to the commit, so two threads can never
+        interleave INSERT / commit on the same connection (2026-11-19: thread B's commit swallowed
+        thread A's INSERT and A's commit raised 'cannot commit - no transaction is active'; two live
+        ORB orders were orphaned). Commits on normal exit, rolls back (if a transaction is open) and
+        re-raises on exception. Re-entrant: a write method may call another write method.
+        """
+        with self._write_lock:
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
+
     def _create_tables(self) -> None:
         """Create all tables if they don't exist."""
         self._create_cache_tables()
@@ -181,7 +205,8 @@ class Database:
 
     def _create_cache_tables(self) -> None:
         """Create cache tables (universe, bars, profiles)."""
-        self._cache_conn.executescript("""
+        with self._write(self._cache_conn):
+            self._cache_conn.executescript("""
             CREATE TABLE IF NOT EXISTS universe (
                 symbol VARCHAR(10) PRIMARY KEY,
                 company_name TEXT,
@@ -208,12 +233,12 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_volume_profiles_symbol
                 ON volume_profiles(symbol);
         """)
-        self._cache_conn.commit()
         logger.debug("Cache tables verified/created")
 
     def _create_trades_tables(self) -> None:
         """Create trades tables (trades, scan_results, summaries)."""
-        self._trades_conn.executescript("""
+        with self._write(self._trades_conn):
+            self._trades_conn.executescript("""
             CREATE TABLE IF NOT EXISTS scan_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 scan_date DATE,
@@ -281,10 +306,10 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_trades_order_id
                 ON trades(order_id);
         """)
-        self._trades_conn.commit()
 
         # Cache tables continued (daily_bars, intraday, news)
-        self._cache_conn.executescript("""
+        with self._write(self._cache_conn):
+            self._cache_conn.executescript("""
             CREATE TABLE IF NOT EXISTS daily_bars (
                 symbol VARCHAR(10) NOT NULL,
                 bar_date DATE NOT NULL,
@@ -345,7 +370,6 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_news_cache_symbol_date
                 ON news_cache(symbol, news_date);
         """)
-        self._cache_conn.commit()
 
     def _migrate(self) -> None:
         """Run database migrations for schema changes on existing DBs."""
@@ -355,21 +379,21 @@ class Database:
                 "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_scan_results_unique'"
             ).fetchone():
                 # Remove duplicates: keep the row with the latest detected_at per group
-                self._trades_conn.execute("""
+                with self._write(self._trades_conn):
+                    self._trades_conn.execute("""
                     DELETE FROM scan_results WHERE id NOT IN (
                         SELECT MAX(id) FROM scan_results
                         GROUP BY scan_date, symbol, phase, COALESCE(time_bucket, '')
                     )
                 """)
-                deleted = self._trades_conn.execute("SELECT changes()").fetchone()[0]
-                if deleted > 0:
-                    logger.info(f"Migration: removed {deleted} duplicate scan_results rows")
+                    deleted = self._trades_conn.execute("SELECT changes()").fetchone()[0]
+                    if deleted > 0:
+                        logger.info(f"Migration: removed {deleted} duplicate scan_results rows")
 
-                self._trades_conn.execute("""
+                    self._trades_conn.execute("""
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_results_unique
                         ON scan_results(scan_date, symbol, phase, COALESCE(time_bucket, ''))
                 """)
-                self._trades_conn.commit()
                 logger.info("Migration: added unique index on scan_results")
         except Exception as e:
             logger.warning(f"Migration 1 (scan_results unique index) failed (non-fatal): {e}")
@@ -378,8 +402,8 @@ class Database:
         try:
             columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             if 'filled_qty' not in columns:
-                self._trades_conn.execute("ALTER TABLE trades ADD COLUMN filled_qty INTEGER")
-                self._trades_conn.commit()
+                with self._write(self._trades_conn):
+                    self._trades_conn.execute("ALTER TABLE trades ADD COLUMN filled_qty INTEGER")
                 logger.info("Migration: added filled_qty column to trades table")
         except Exception as e:
             logger.warning(f"Migration 2 (filled_qty column) failed (non-fatal): {e}")
@@ -390,8 +414,8 @@ class Database:
         try:
             columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             if 'real_stop_loss_price' not in columns:
-                self._trades_conn.execute("ALTER TABLE trades ADD COLUMN real_stop_loss_price REAL")
-                self._trades_conn.commit()
+                with self._write(self._trades_conn):
+                    self._trades_conn.execute("ALTER TABLE trades ADD COLUMN real_stop_loss_price REAL")
                 logger.info("Migration: added real_stop_loss_price column to trades table")
         except Exception as e:
             logger.warning(f"Migration 3 (real_stop_loss_price column) failed (non-fatal): {e}")
@@ -408,13 +432,13 @@ class Database:
         try:
             columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             added = []
-            for col_name, col_type in partial_cols.items():
-                if col_name not in columns:
-                    self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
-                    added.append(col_name)
-            if added:
-                self._trades_conn.commit()
-                logger.info(f"Migration 4: added partial exit columns to trades: {added}")
+            with self._write(self._trades_conn):
+                for col_name, col_type in partial_cols.items():
+                    if col_name not in columns:
+                        self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                        added.append(col_name)
+                if added:
+                    logger.info(f"Migration 4: added partial exit columns to trades: {added}")
         except Exception as e:
             logger.warning(f"Migration 4 (partial exit columns) failed (non-fatal): {e}")
 
@@ -429,13 +453,13 @@ class Database:
         try:
             columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             added = []
-            for col_name, col_type in news_cols.items():
-                if col_name not in columns:
-                    self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
-                    added.append(col_name)
-            if added:
-                self._trades_conn.commit()
-                logger.info(f"Migration 5: added news columns to trades: {added}")
+            with self._write(self._trades_conn):
+                for col_name, col_type in news_cols.items():
+                    if col_name not in columns:
+                        self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                        added.append(col_name)
+                if added:
+                    logger.info(f"Migration 5: added news columns to trades: {added}")
         except Exception as e:
             logger.warning(f"Migration 5 (news columns) failed (non-fatal): {e}")
 
@@ -458,13 +482,13 @@ class Database:
         try:
             columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             added = []
-            for col_name, col_type in exit_micro_cols.items():
-                if col_name not in columns:
-                    self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
-                    added.append(col_name)
-            if added:
-                self._trades_conn.commit()
-                logger.info(f"Migration 6: added exit microstructure columns: {added}")
+            with self._write(self._trades_conn):
+                for col_name, col_type in exit_micro_cols.items():
+                    if col_name not in columns:
+                        self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                        added.append(col_name)
+                if added:
+                    logger.info(f"Migration 6: added exit microstructure columns: {added}")
         except Exception as e:
             logger.warning(f"Migration 6 (exit microstructure) failed (non-fatal): {e}")
 
@@ -483,13 +507,13 @@ class Database:
         try:
             columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             added = []
-            for col_name, col_type in entry_micro_cols.items():
-                if col_name not in columns:
-                    self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
-                    added.append(col_name)
-            if added:
-                self._trades_conn.commit()
-                logger.info(f"Migration 7: added entry microstructure columns: {added}")
+            with self._write(self._trades_conn):
+                for col_name, col_type in entry_micro_cols.items():
+                    if col_name not in columns:
+                        self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                        added.append(col_name)
+                if added:
+                    logger.info(f"Migration 7: added entry microstructure columns: {added}")
         except Exception as e:
             logger.warning(f"Migration 7 (entry microstructure) failed (non-fatal): {e}")
 
@@ -498,8 +522,8 @@ class Database:
         try:
             columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             if 'strategy' not in columns:
-                self._trades_conn.execute("ALTER TABLE trades ADD COLUMN strategy VARCHAR(20) DEFAULT 'bull_flag'")
-                self._trades_conn.commit()
+                with self._write(self._trades_conn):
+                    self._trades_conn.execute("ALTER TABLE trades ADD COLUMN strategy VARCHAR(20) DEFAULT 'bull_flag'")
                 logger.info("Migration 8: added strategy column to trades (default='bull_flag')")
         except Exception as e:
             logger.warning(f"Migration 8 (strategy column) failed (non-fatal): {e}")
@@ -510,13 +534,13 @@ class Database:
         try:
             columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             added = []
-            for col in ['entry_l2_depth', 'exit_l2_depth']:
-                if col not in columns:
-                    self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col} TEXT")
-                    added.append(col)
-            if added:
-                self._trades_conn.commit()
-                logger.info(f"Migration 9: added L2 depth columns: {added}")
+            with self._write(self._trades_conn):
+                for col in ['entry_l2_depth', 'exit_l2_depth']:
+                    if col not in columns:
+                        self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col} TEXT")
+                        added.append(col)
+                if added:
+                    logger.info(f"Migration 9: added L2 depth columns: {added}")
         except Exception as e:
             logger.warning(f"Migration 9 (L2 depth columns) failed (non-fatal): {e}")
 
@@ -541,13 +565,13 @@ class Database:
         try:
             columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             added = []
-            for col_name, col_type in slippage_cols.items():
-                if col_name not in columns:
-                    self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
-                    added.append(col_name)
-            if added:
-                self._trades_conn.commit()
-                logger.info(f"Migration 10: added slippage timing columns: {added}")
+            with self._write(self._trades_conn):
+                for col_name, col_type in slippage_cols.items():
+                    if col_name not in columns:
+                        self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                        added.append(col_name)
+                if added:
+                    logger.info(f"Migration 10: added slippage timing columns: {added}")
         except Exception as e:
             logger.warning(f"Migration 10 (slippage timing) failed (non-fatal): {e}")
 
@@ -564,15 +588,15 @@ class Database:
         try:
             cols = [row[1] for row in self._cache_conn.execute("PRAGMA table_info(universe)").fetchall()]
             added = []
-            if 'is_marginable' not in cols:
-                self._cache_conn.execute("ALTER TABLE universe ADD COLUMN is_marginable INTEGER DEFAULT NULL")
-                added.append('is_marginable')
-            if 'marginability_checked_at' not in cols:
-                self._cache_conn.execute("ALTER TABLE universe ADD COLUMN marginability_checked_at TIMESTAMP DEFAULT NULL")
-                added.append('marginability_checked_at')
-            if added:
-                self._cache_conn.commit()
-                logger.info(f"Migration 12: added marginability columns to universe: {added}")
+            with self._write(self._cache_conn):
+                if 'is_marginable' not in cols:
+                    self._cache_conn.execute("ALTER TABLE universe ADD COLUMN is_marginable INTEGER DEFAULT NULL")
+                    added.append('is_marginable')
+                if 'marginability_checked_at' not in cols:
+                    self._cache_conn.execute("ALTER TABLE universe ADD COLUMN marginability_checked_at TIMESTAMP DEFAULT NULL")
+                    added.append('marginability_checked_at')
+                if added:
+                    logger.info(f"Migration 12: added marginability columns to universe: {added}")
         except Exception as e:
             logger.warning(f"Migration 12 (universe marginability) failed (non-fatal): {e}")
 
@@ -585,12 +609,12 @@ class Database:
         try:
             cols = [row[1] for row in self._cache_conn.execute("PRAGMA table_info(news_cache)").fetchall()]
             if 'halt' not in cols:
-                self._cache_conn.execute("ALTER TABLE news_cache ADD COLUMN halt INTEGER DEFAULT 0")
-                self._cache_conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_news_cache_halt "
-                    "ON news_cache(symbol, news_date, halt)"
-                )
-                self._cache_conn.commit()
+                with self._write(self._cache_conn):
+                    self._cache_conn.execute("ALTER TABLE news_cache ADD COLUMN halt INTEGER DEFAULT 0")
+                    self._cache_conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_news_cache_halt "
+                        "ON news_cache(symbol, news_date, halt)"
+                    )
                 logger.info("Migration 11: added halt column + index to news_cache")
         except Exception as e:
             logger.warning(f"Migration 11 (news_cache halt column) failed (non-fatal): {e}")
@@ -609,10 +633,10 @@ class Database:
             columns = [row[1] for row in self._trades_conn.execute(
                 "PRAGMA table_info(trades)").fetchall()]
             if 'reject_reason' not in columns:
-                self._trades_conn.execute(
-                    "ALTER TABLE trades ADD COLUMN reject_reason VARCHAR(100)"
-                )
-                self._trades_conn.commit()
+                with self._write(self._trades_conn):
+                    self._trades_conn.execute(
+                        "ALTER TABLE trades ADD COLUMN reject_reason VARCHAR(100)"
+                    )
                 logger.info("Migration 13: added reject_reason column to trades")
         except Exception as e:
             logger.warning(f"Migration 13 (reject_reason column) failed (non-fatal): {e}")
@@ -648,15 +672,15 @@ class Database:
             columns = [row[1] for row in self._trades_conn.execute(
                 "PRAGMA table_info(trades)").fetchall()]
             added = []
-            for col_name, col_type in scale_cols.items():
-                if col_name not in columns:
-                    self._trades_conn.execute(
-                        f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
-                    added.append(col_name)
-            if added:
-                self._trades_conn.commit()
-                logger.info(f"Migration 14: added ORB scale-out columns to "
-                            f"trades: {added}")
+            with self._write(self._trades_conn):
+                for col_name, col_type in scale_cols.items():
+                    if col_name not in columns:
+                        self._trades_conn.execute(
+                            f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                        added.append(col_name)
+                if added:
+                    logger.info(f"Migration 14: added ORB scale-out columns to "
+                                f"trades: {added}")
         except Exception as e:
             logger.warning(f"Migration 14 (scale-out columns) failed "
                            f"(non-fatal): {e}")
@@ -685,9 +709,9 @@ class Database:
             columns = [row[1] for row in self._trades_conn.execute(
                 "PRAGMA table_info(trades)").fetchall()]
             if 'exit_branch' not in columns:
-                self._trades_conn.execute(
-                    "ALTER TABLE trades ADD COLUMN exit_branch VARCHAR(24)")
-                self._trades_conn.commit()
+                with self._write(self._trades_conn):
+                    self._trades_conn.execute(
+                        "ALTER TABLE trades ADD COLUMN exit_branch VARCHAR(24)")
                 logger.info("Migration 15: added exit_branch column to trades")
         except Exception as e:
             logger.warning(f"Migration 15 (exit_branch column) failed "
@@ -704,7 +728,8 @@ class Database:
         # populations are never silently mixed. See persistence/database.py insert_dry_entry/
         # close_dry_trade/get_dry_trades, scripts/backfill_dry_trades.py.
         try:
-            self._trades_conn.executescript("""
+            with self._write(self._trades_conn):
+                self._trades_conn.executescript("""
                 CREATE TABLE IF NOT EXISTS dry_trades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     strategy VARCHAR(20) NOT NULL,
@@ -729,7 +754,6 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_dry_trades_strategy_date
                     ON dry_trades(strategy, trade_date);
             """)
-            self._trades_conn.commit()
             logger.info("Migration 16: ensured dry_trades table")
         except Exception as e:
             logger.warning(f"Migration 16 (dry_trades table) failed (non-fatal): {e}")
@@ -743,8 +767,8 @@ class Database:
         try:
             columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             if 'account' not in columns:
-                self._trades_conn.execute("ALTER TABLE trades ADD COLUMN account VARCHAR(10)")
-                self._trades_conn.commit()
+                with self._write(self._trades_conn):
+                    self._trades_conn.execute("ALTER TABLE trades ADD COLUMN account VARCHAR(10)")
                 logger.info("Migration 17: added account column to trades table")
         except Exception as e:
             logger.warning(f"Migration 17 (account column) failed (non-fatal): {e}")
@@ -773,7 +797,8 @@ class Database:
         row['created_at'] = now
         row['updated_at'] = now
         try:
-            cursor = self._trades_conn.execute("""
+            with self._write(self._trades_conn):
+                cursor = self._trades_conn.execute("""
                 INSERT INTO dry_trades (strategy, trade_date, symbol, entry_ts, entry_px, shares,
                                          stop_px, target_px, exit_ts, exit_px, exit_reason,
                                          r_multiple, pnl_usd, risk_usd, source, extra_json,
@@ -783,7 +808,6 @@ class Database:
                         :r_multiple, :pnl_usd, :risk_usd, :source, :extra_json,
                         :created_at, :updated_at)
             """, row)
-            self._trades_conn.commit()
             logger.info(f"Dry entry saved: {row['strategy']} {row['symbol']} {row['trade_date']} "
                         f"(source={row['source']}, id={cursor.lastrowid})")
             return cursor.lastrowid
@@ -801,14 +825,14 @@ class Database:
             logger.warning("close_dry_trade called with dry_trade_id=None — nothing to close")
             return
         try:
-            self._trades_conn.execute("""
+            with self._write(self._trades_conn):
+                self._trades_conn.execute("""
                 UPDATE dry_trades
                 SET exit_ts = ?, exit_px = ?, exit_reason = ?, r_multiple = ?, pnl_usd = ?,
                     updated_at = ?
                 WHERE id = ?
             """, (exit_ts, exit_px, exit_reason, r_multiple, pnl_usd,
-                  datetime.now(timezone.utc), dry_trade_id))
-            self._trades_conn.commit()
+                      datetime.now(timezone.utc), dry_trade_id))
             logger.info(f"Dry trade {dry_trade_id} closed: {exit_reason} @ {exit_px} "
                         f"({r_multiple} R, ${pnl_usd})")
         except Exception as e:
@@ -830,11 +854,11 @@ class Database:
             return
         cols = ', '.join(f"{k} = ?" for k in fields)
         try:
-            self._trades_conn.execute(
-                f"UPDATE dry_trades SET {cols}, updated_at = ? WHERE id = ?",
-                (*fields.values(), datetime.now(timezone.utc), dry_trade_id)
-            )
-            self._trades_conn.commit()
+            with self._write(self._trades_conn):
+                self._trades_conn.execute(
+                    f"UPDATE dry_trades SET {cols}, updated_at = ? WHERE id = ?",
+                    (*fields.values(), datetime.now(timezone.utc), dry_trade_id)
+                )
             logger.info(f"Dry trade {dry_trade_id} updated: {fields}")
         except Exception as e:
             logger.warning(f"update_dry_entry failed for id={dry_trade_id}: {e}")
@@ -873,8 +897,8 @@ class Database:
             if end:
                 query += " AND trade_date <= ?"
                 params.append(end)
-            cursor = self._trades_conn.execute(query, params)
-            self._trades_conn.commit()
+            with self._write(self._trades_conn):
+                cursor = self._trades_conn.execute(query, params)
             logger.info(f"delete_dry_trades: removed {cursor.rowcount} row(s) for {strategy}/{source} "
                         f"[{start}, {end}]")
             return cursor.rowcount
@@ -924,18 +948,18 @@ class Database:
             halt: True if headline matched halt-vocabulary regex (separate from catalyst).
         """
         try:
-            self._cache_conn.execute(
-                "INSERT OR REPLACE INTO news_cache "
-                "(symbol, news_date, headline, catalyst, reason, classified_at, halt) "
-                "VALUES (?, ?, ?, ?, ?, datetime('now'), ?)",
-                (
-                    symbol, news_date, (headline or '')[:500],
-                    (1 if catalyst else 0) if catalyst is not None else None,
-                    (reason or '')[:100],
-                    1 if halt else 0,
-                ),
-            )
-            self._cache_conn.commit()
+            with self._write(self._cache_conn):
+                self._cache_conn.execute(
+                    "INSERT OR REPLACE INTO news_cache "
+                    "(symbol, news_date, headline, catalyst, reason, classified_at, halt) "
+                    "VALUES (?, ?, ?, ?, ?, datetime('now'), ?)",
+                    (
+                        symbol, news_date, (headline or '')[:500],
+                        (1 if catalyst else 0) if catalyst is not None else None,
+                        (reason or '')[:100],
+                        1 if halt else 0,
+                    ),
+                )
         except Exception as e:
             logger.warning(f"save_news_classification({symbol}, {news_date}) failed: {e}")
 
@@ -979,7 +1003,8 @@ class Database:
         Args:
             stock: Dict with keys matching universe columns
         """
-        self._cache_conn.execute("""
+        with self._write(self._cache_conn):
+            self._cache_conn.execute("""
             INSERT INTO universe (symbol, company_name, exchange, sector, country,
                                   price_close, float_shares, float_updated_at,
                                   avg_volume_daily, last_updated, active)
@@ -998,7 +1023,6 @@ class Database:
                 last_updated = excluded.last_updated,
                 active = excluded.active
         """, stock)
-        self._cache_conn.commit()
 
     def upsert_universe_stocks_batch(self, stocks: List[Dict[str, Any]]) -> int:
         """
@@ -1013,7 +1037,8 @@ class Database:
         if not stocks:
             return 0
 
-        self._cache_conn.executemany("""
+        with self._write(self._cache_conn):
+            self._cache_conn.executemany("""
             INSERT INTO universe (symbol, company_name, exchange, sector, country,
                                   price_close, float_shares, float_updated_at,
                                   avg_volume_daily, last_updated, active)
@@ -1032,7 +1057,6 @@ class Database:
                 last_updated = excluded.last_updated,
                 active = excluded.active
         """, stocks)
-        self._cache_conn.commit()
         return len(stocks)
 
     def get_active_universe(self) -> List[Dict[str, Any]]:
@@ -1086,22 +1110,22 @@ class Database:
         """
         now = datetime.now(timezone.utc)
         try:
-            cursor = self._cache_conn.execute(
-                "UPDATE universe SET is_marginable = ?, "
-                "marginability_checked_at = ? WHERE symbol = ?",
-                (1 if is_marginable else 0, now, symbol),
-            )
-            if cursor.rowcount == 0:
-                logger.warning(
-                    f"set_marginability({symbol}, {is_marginable}) — "
-                    f"symbol not in universe; inserting minimal row"
+            with self._write(self._cache_conn):
+                cursor = self._cache_conn.execute(
+                    "UPDATE universe SET is_marginable = ?, "
+                    "marginability_checked_at = ? WHERE symbol = ?",
+                    (1 if is_marginable else 0, now, symbol),
                 )
-                self._cache_conn.execute(
-                    "INSERT INTO universe (symbol, is_marginable, "
-                    "marginability_checked_at, active) VALUES (?, ?, ?, 1)",
-                    (symbol, 1 if is_marginable else 0, now),
-                )
-            self._cache_conn.commit()
+                if cursor.rowcount == 0:
+                    logger.warning(
+                        f"set_marginability({symbol}, {is_marginable}) — "
+                        f"symbol not in universe; inserting minimal row"
+                    )
+                    self._cache_conn.execute(
+                        "INSERT INTO universe (symbol, is_marginable, "
+                        "marginability_checked_at, active) VALUES (?, ?, ?, 1)",
+                        (symbol, 1 if is_marginable else 0, now),
+                    )
         except Exception as e:
             logger.error(
                 f"set_marginability({symbol}, {is_marginable}) failed: {e}"
@@ -1121,11 +1145,11 @@ class Database:
             return 0
 
         placeholders = ','.join('?' for _ in symbols)
-        cursor = self._cache_conn.execute(
-            f"UPDATE universe SET active = 0, last_updated = ? WHERE symbol IN ({placeholders})",
-            [datetime.now(timezone.utc)] + symbols
-        )
-        self._cache_conn.commit()
+        with self._write(self._cache_conn):
+            cursor = self._cache_conn.execute(
+                f"UPDATE universe SET active = 0, last_updated = ? WHERE symbol IN ({placeholders})",
+                [datetime.now(timezone.utc)] + symbols
+            )
         return cursor.rowcount
 
     def get_symbols_needing_float_update(self, max_age_days: int = 7) -> List[str]:
@@ -1155,11 +1179,11 @@ class Database:
         even when float_shares is None (prevents re-fetching unavailable data).
         """
         now = datetime.now(timezone.utc)
-        self._cache_conn.execute("""
+        with self._write(self._cache_conn):
+            self._cache_conn.execute("""
             UPDATE universe SET float_shares = ?, float_updated_at = ?, last_updated = ?
             WHERE symbol = ?
         """, (float_shares, now, now, symbol))
-        self._cache_conn.commit()
 
     # =========================================================================
     # Volume profile operations
@@ -1178,14 +1202,14 @@ class Database:
         if not profiles:
             return 0
 
-        self._cache_conn.executemany("""
+        with self._write(self._cache_conn):
+            self._cache_conn.executemany("""
             INSERT INTO volume_profiles (symbol, time_bucket, avg_volume, last_updated)
             VALUES (:symbol, :time_bucket, :avg_volume, :last_updated)
             ON CONFLICT(symbol, time_bucket) DO UPDATE SET
                 avg_volume = excluded.avg_volume,
                 last_updated = excluded.last_updated
         """, profiles)
-        self._cache_conn.commit()
         return len(profiles)
 
     def get_volume_profile(self, symbol: str) -> Dict[str, int]:
@@ -1221,8 +1245,8 @@ class Database:
 
     def delete_volume_profiles(self, symbol: str) -> None:
         """Delete all volume profiles for a symbol."""
-        self._cache_conn.execute("DELETE FROM volume_profiles WHERE symbol = ?", (symbol,))
-        self._cache_conn.commit()
+        with self._write(self._cache_conn):
+            self._cache_conn.execute("DELETE FROM volume_profiles WHERE symbol = ?", (symbol,))
 
     # =========================================================================
     # Scan results operations
@@ -1238,7 +1262,8 @@ class Database:
         Returns:
             ID of the inserted row
         """
-        cursor = self._trades_conn.execute("""
+        with self._write(self._trades_conn):
+            cursor = self._trades_conn.execute("""
             INSERT OR REPLACE INTO scan_results (scan_date, symbol, detected_at, phase,
                                       prev_close, current_price, gap_pct,
                                       intraday_change_pct, relative_volume,
@@ -1250,7 +1275,6 @@ class Database:
                     :current_volume, :time_bucket, :float_shares,
                     :has_news, :news_headline, :qualified)
         """, result)
-        self._trades_conn.commit()
         return cursor.lastrowid
 
     def get_scan_results(self, scan_date: str, phase: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -1309,7 +1333,8 @@ class Database:
         trade.setdefault('account', 'paper')
         trade.setdefault('created_at', now)
         trade.setdefault('updated_at', now)
-        cursor = self._trades_conn.execute("""
+        with self._write(self._trades_conn):
+            cursor = self._trades_conn.execute("""
             INSERT INTO trades (trade_date, symbol, side, entry_price,
                                stop_loss_price, take_profit_price, shares,
                                risk_per_share, total_risk, risk_reward_ratio,
@@ -1325,7 +1350,6 @@ class Database:
                     :pnl, :pnl_pct, :pattern_data,
                     :strategy, :account, :created_at, :updated_at)
         """, trade)
-        self._trades_conn.commit()
         logger.info(f"Saved trade: {trade['symbol']} {trade['side']} "
                      f"{trade['shares']} shares @ ${trade['entry_price']:.2f}")
         return cursor.lastrowid
@@ -1341,10 +1365,10 @@ class Database:
         updates['updated_at'] = datetime.now(timezone.utc)
         set_clause = ', '.join(f"{k} = :{k}" for k in updates)
         updates['id'] = trade_id
-        self._trades_conn.execute(
-            f"UPDATE trades SET {set_clause} WHERE id = :id", updates
-        )
-        self._trades_conn.commit()
+        with self._write(self._trades_conn):
+            self._trades_conn.execute(
+                f"UPDATE trades SET {set_clause} WHERE id = :id", updates
+            )
         logger.debug(f"Updated trade {trade_id}: {list(updates.keys())}")
 
     def get_trade_by_order_id(self, order_id: str) -> Optional[Dict[str, Any]]:
@@ -1502,7 +1526,8 @@ class Database:
         Args:
             summary: Dict with trade_date and summary stats
         """
-        self._trades_conn.execute("""
+        with self._write(self._trades_conn):
+            self._trades_conn.execute("""
             INSERT INTO daily_trading_summary
                 (trade_date, total_trades, winning_trades, losing_trades,
                  gross_pnl, patterns_detected, patterns_traded)
@@ -1516,7 +1541,6 @@ class Database:
                 patterns_detected = excluded.patterns_detected,
                 patterns_traded = excluded.patterns_traded
         """, summary)
-        self._trades_conn.commit()
         logger.info(f"Saved daily summary for {summary['trade_date']}: "
                      f"{summary['total_trades']} trades, P&L: ${summary['gross_pnl']:.2f}")
 
@@ -1582,12 +1606,12 @@ class Database:
             return 0
 
         now = datetime.now(timezone.utc)
-        self._cache_conn.executemany("""
+        with self._write(self._cache_conn):
+            self._cache_conn.executemany("""
             INSERT OR REPLACE INTO daily_bars
                 (symbol, bar_date, open, high, low, close, volume, fetched_at)
             VALUES (:symbol, :date, :open, :high, :low, :close, :volume, :fetched_at)
         """, [{**b, 'fetched_at': now} for b in bars])
-        self._cache_conn.commit()
         logger.info(f"Cached {len(bars)} daily bars")
         return len(bars)
 
@@ -1618,24 +1642,24 @@ class Database:
         # Sweep stale (pre-today) rows so a previous run's leftover can't
         # linger after the next day's boundary.
         today_str = today_et().isoformat()
-        cur = self._cache_conn.execute(
-            "DELETE FROM daily_bars_provisional WHERE bar_date < ?",
-            (today_str,),
-        )
-        swept = cur.rowcount or 0
-        if swept:
-            logger.info(
-                f"save_daily_bars_provisional: swept {swept} stale pre-today "
-                f"row(s) (< {today_str}) before insert"
+        with self._write(self._cache_conn):
+            cur = self._cache_conn.execute(
+                "DELETE FROM daily_bars_provisional WHERE bar_date < ?",
+                (today_str,),
             )
+            swept = cur.rowcount or 0
+            if swept:
+                logger.info(
+                    f"save_daily_bars_provisional: swept {swept} stale pre-today "
+                    f"row(s) (< {today_str}) before insert"
+                )
 
-        now = datetime.now(timezone.utc)
-        self._cache_conn.executemany("""
+            now = datetime.now(timezone.utc)
+            self._cache_conn.executemany("""
             INSERT OR REPLACE INTO daily_bars_provisional
                 (symbol, bar_date, open, high, low, close, volume, fetched_at)
             VALUES (:symbol, :date, :open, :high, :low, :close, :volume, :fetched_at)
         """, [{**b, 'fetched_at': now} for b in bars])
-        self._cache_conn.commit()
         logger.info(f"Cached {len(bars)} PROVISIONAL daily bars (sidecar)")
         return len(bars)
 
@@ -1644,9 +1668,9 @@ class Database:
         stale mid-day data from a previous run doesn't leak into today's
         features extraction.
         """
-        cur = self._cache_conn.execute("DELETE FROM daily_bars_provisional")
-        n = cur.rowcount or 0
-        self._cache_conn.commit()
+        with self._write(self._cache_conn):
+            cur = self._cache_conn.execute("DELETE FROM daily_bars_provisional")
+            n = cur.rowcount or 0
         if n:
             logger.info(f"Cleared {n} provisional daily bars")
         return n
@@ -1814,12 +1838,12 @@ class Database:
                 'volume': int(b['volume']),
             })
 
-        self._cache_conn.executemany("""
+        with self._write(self._cache_conn):
+            self._cache_conn.executemany("""
             INSERT OR REPLACE INTO intraday_bars_1min
                 (symbol, bar_date, timestamp, open, high, low, close, volume)
             VALUES (:symbol, :bar_date, :timestamp, :open, :high, :low, :close, :volume)
         """, rows)
-        self._cache_conn.commit()
         logger.debug(f"Cached {len(rows)} intraday 1-min bars for {symbol} on {bar_date}")
         return len(rows)
 
@@ -1833,7 +1857,8 @@ class Database:
     # ------------------------------------------------------------------
     def ensure_premarket_backfill_table(self) -> None:
         """Create the backfill done-marker table if missing (idempotent)."""
-        self._cache_conn.execute("""
+        with self._write(self._cache_conn):
+            self._cache_conn.execute("""
             CREATE TABLE IF NOT EXISTS orb_premarket_backfill_done (
                 symbol VARCHAR(10) NOT NULL,
                 bar_date DATE NOT NULL,
@@ -1842,7 +1867,6 @@ class Database:
                 PRIMARY KEY (symbol, bar_date)
             )
         """)
-        self._cache_conn.commit()
 
     def get_premarket_backfilled_symbols(self, bar_date: str) -> set:
         """Symbols already backfilled for `bar_date` (resume support)."""
@@ -1856,12 +1880,12 @@ class Database:
         """Record that (symbol, bar_date) premarket bars were fetched.
         `n_bars` = 0 means the API returned no prints — a real observation,
         distinct from 'never fetched' (row absent)."""
-        self._cache_conn.execute("""
+        with self._write(self._cache_conn):
+            self._cache_conn.execute("""
             INSERT OR REPLACE INTO orb_premarket_backfill_done
                 (symbol, bar_date, n_bars, fetched_at)
             VALUES (?, ?, ?, ?)
         """, (symbol, bar_date, int(n_bars), datetime.now(timezone.utc)))
-        self._cache_conn.commit()
 
     # ------------------------------------------------------------------
     # HOD-break same-clock volume profile (owner 2026-09-13): cumulative RTH volume
@@ -1870,13 +1894,13 @@ class Database:
     # ------------------------------------------------------------------
     def ensure_hod_volume_profile_table(self) -> None:
         """Idempotent DDL for hod_volume_profile (distinct from the 15-min `volume_profiles`)."""
-        self._cache_conn.execute("""
+        with self._write(self._cache_conn):
+            self._cache_conn.execute("""
             CREATE TABLE IF NOT EXISTS hod_volume_profile (
                 symbol TEXT NOT NULL, bar_date TEXT NOT NULL, cut_minute INTEGER NOT NULL,
                 cum_volume REAL NOT NULL, day_volume REAL, updated_at TIMESTAMP,
                 PRIMARY KEY (symbol, bar_date, cut_minute))
         """)
-        self._cache_conn.commit()
 
     def upsert_hod_volume_profile(self, rows: List[Dict]) -> int:
         """rows: {symbol, bar_date, cut_minute, cum_volume, day_volume}. Returns rows written."""
@@ -1884,11 +1908,11 @@ class Database:
             return 0
         self.ensure_hod_volume_profile_table()
         now = datetime.now(timezone.utc)
-        self._cache_conn.executemany("""
+        with self._write(self._cache_conn):
+            self._cache_conn.executemany("""
             INSERT OR REPLACE INTO hod_volume_profile (symbol, bar_date, cut_minute, cum_volume, day_volume, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
         """, [(r['symbol'], r['bar_date'], int(r['cut_minute']), float(r['cum_volume']), r.get('day_volume'), now) for r in rows])
-        self._cache_conn.commit()
         return len(rows)
 
     def get_hod_volume_profile(self, symbol: str, cut_minute: int, before_date: str, n_days: int = 20) -> List[float]:

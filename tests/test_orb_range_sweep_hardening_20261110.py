@@ -288,3 +288,48 @@ class TestEodSelectionParityLine:
         assert 'no observer audit' in rc.selection_parity_line('2026-11-10', logs_dir=tmp_path)
         (tmp_path / 'orb_selection_audit_20261110.json').write_text('{not json')
         assert 'unreadable' in rc.selection_parity_line('2026-11-10', logs_dir=tmp_path)
+
+
+class TestThinNamesAreNotVendorLateness:
+    """2026-11-19 09:40 ET: 11 rangeless names, ALL `short_window` (bars delivered on every one of ten
+    retries, fewer than five prints inside 09:30-09:35) while 130 other candidates had ranges — the
+    engine raised 'vendor bars late ... ORB is trading a thin field today'. A name that does not trade
+    every minute is a property of the name, not of the vendor: only `no_bars` / `no_open_bar` leftovers
+    count toward the vendor-late alarm. TETH joined the universe mid-sweep and the WARNING read
+    '12/11 rangeless' — the denominator is the union of the first-pass set and the leftovers."""
+
+    def test_eleven_short_window_names_warn_but_never_alarm(self, engine, caplog):
+        caplog.set_level(logging.INFO)
+        _universe(engine, 11)
+        engine.alpaca.get_1min_bars_multi = lambda symbols, lookback_minutes=60: {
+            s: make_bars(3) for s in symbols}                      # bars present, window short
+        with Clock(T0941):
+            engine._ensure_ranges_post_open()
+        assert engine._post_open_range_sweep_done is True
+        gave_up = [r.getMessage() for r in _records(caplog, logging.WARNING) if 'gave up' in r.getMessage()]
+        assert len(gave_up) == 1 and '11/11 rangeless' in gave_up[0] and 'filled 0/11' in gave_up[0]
+        assert not _records(caplog, logging.ERROR)
+
+    def test_eleven_no_bars_names_still_alarm(self, engine, caplog):
+        caplog.set_level(logging.INFO)
+        _universe(engine, 11)
+        engine.alpaca.get_1min_bars_multi = MagicMock(return_value={})   # vendor returned nothing
+        with Clock(T0941):
+            engine._ensure_ranges_post_open()
+        errs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+        assert len(errs) == 1 and 'only 0/11' in errs[0]
+
+    def test_late_joiner_counts_in_the_denominator(self, engine, caplog):
+        caplog.set_level(logging.INFO)
+        syms = _universe(engine, 11)
+        engine.alpaca.get_1min_bars_multi = MagicMock(return_value={})
+        # first pass records the 11; a 12th rangeless candidate appears before the deadline
+        with Clock(T0935):
+            engine._ensure_ranges_post_open()
+        extra = _universe(engine, 12)[-1]
+        assert extra not in syms
+        with Clock(T0941):
+            time.sleep(0.03)
+            engine._ensure_ranges_post_open()
+        gave_up = [r.getMessage() for r in _records(caplog, logging.WARNING) if 'gave up' in r.getMessage()]
+        assert len(gave_up) == 1 and '12/12 rangeless' in gave_up[0] and 'filled 0/12' in gave_up[0]

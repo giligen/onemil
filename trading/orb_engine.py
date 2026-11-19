@@ -2040,9 +2040,12 @@ class ORBEngine:
         candidates filled with >= 10 of them -> one ERROR per day (vendor bars
         late; ORB is trading a thin field).
         """
-        initial = self._sweep_initial_missing or leftovers
+        # Denominator = every candidate that was rangeless at any pass today: the
+        # first-pass set plus any late joiner (2026-11-19: TETH entered the universe
+        # at 09:39 and the line read "12/11 rangeless").
+        initial = set(self._sweep_initial_missing or leftovers) | set(leftovers)
         n = len(initial)
-        filled = n - len([s for s in initial if s in set(leftovers)])
+        filled = n - len(set(leftovers))
         hhmmss = et_end.time().strftime('%H:%M:%S')
         if not leftovers:
             logger.info(f"ORB: post-open range sweep — filled {filled}/{n} ranges")
@@ -2060,12 +2063,19 @@ class ORBEngine:
             f"{len(leftovers)}/{n} rangeless: short_window {_fmt(groups['short_window'])}, "
             f"no_bars {_fmt(groups['no_bars'])}, no_open_bar {_fmt(groups['no_open_bar'])} "
             f"(filled {filled}/{n})")
-        if n >= 10 and filled < 0.5 * n and not self._sweep_degraded_alarmed_today:
+        # The alarm measures VENDOR lateness: a `short_window` leftover had bars on
+        # every retry and simply never printed five 09:30-09:35 minutes — a property
+        # of the name, not of the feed (2026-11-19: 11/11 short_window while 130
+        # other candidates had ranges fired "ORB is trading a thin field today").
+        # Only no_bars / no_open_bar count; they must be the majority of the set.
+        vendor_late = len(groups['no_bars']) + len(groups['no_open_bar'])
+        if n >= 10 and vendor_late > 0.5 * n and not self._sweep_degraded_alarmed_today:
             self._sweep_degraded_alarmed_today = True
             logger.error(
                 f"[ORB] post-open range sweep: vendor bars late — only {filled}/{n} "
                 f"candidates have a range by {hhmmss[:5]} ET "
-                f"(short_window {len(groups['short_window'])}) — ORB is trading a thin "
+                f"(no_bars {len(groups['no_bars'])}, no_open_bar {len(groups['no_open_bar'])}, "
+                f"short_window {len(groups['short_window'])}) — ORB is trading a thin "
                 f"field today")
 
     # =====================================================================
@@ -9077,11 +9087,32 @@ class ORBEngine:
                     if submit_bid > 0 and submit_ask > 0 else None
                 ),
             }
-            trade_id = self.db.save_trade(record)
+            trade_id = self._save_trade_recovering(record, plan.symbol, order_id)
             return int(trade_id) if trade_id else None
         except Exception as e:
             logger.error(f"ORB: save_trade failed for {plan.symbol}: {e}")
             return None
+
+    def _save_trade_recovering(self, record: Dict[str, object], symbol: str, order_id: str):
+        """save_trade, never orphaning a row that actually landed.
+
+        2026-11-19: a shared-connection commit race made save_trade raise although the row was
+        committed (by the other thread), so two live orders were dropped from tracking. On an
+        exception: if the row exists by order_id adopt its id (WARNING); else retry once
+        (WARNING on success); a second failure propagates to the caller's ERROR path.
+        """
+        try:
+            return self.db.save_trade(record)
+        except Exception as e:
+            logger.warning(f"ORB: save_trade raised for {symbol} ({e}) — checking whether the row landed")
+        row = self.db.get_trade_by_order_id(order_id)
+        if row:
+            logger.warning(f"ORB: {symbol} row for order {order_id} exists (id {row['id']}) although "
+                           f"save_trade raised — commit raced another thread; adopting it")
+            return int(row['id'])
+        trade_id = self.db.save_trade(record)
+        logger.warning(f"ORB: {symbol} save_trade retry succeeded for order {order_id} (id {trade_id})")
+        return trade_id
 
     def _handle_reject(self, symbol: str, reject: PlannerReject) -> None:
         if reject.reason == 'spread_gate' and self.notify_on_spread_skip and self.notifier:
