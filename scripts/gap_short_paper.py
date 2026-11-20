@@ -607,7 +607,12 @@ def score_row(row: dict, orders: list, snap: dict) -> dict:
         if ask and cv:
             out["slip_bp_vs_ask"] = round((cv / ask - 1) * 1e4, 1)
         if row.get("locate_fee_bp") in ("", None):
-            logger.warning("score: locate_fee_bp blank for %s %s - using the default LOCATE_BP %.1f", day, sym, R.LOCATE_BP)
+            if str(row.get("locate_status") or "") == "etb":
+                # an easy-to-borrow name has no locate quote by construction; the BT charges the advisory
+                # LOCATE_BP on every trade, so the default IS the parity number (2026-11-20 CAPR)
+                logger.info("score: %s %s is etb (no locate quote) - BT advisory LOCATE_BP %.1f applies by construction", day, sym, R.LOCATE_BP)
+            else:
+                logger.warning("score: locate_fee_bp blank for %s %s - using the default LOCATE_BP %.1f", day, sym, R.LOCATE_BP)
             loc = R.LOCATE_BP
         else:
             loc = float(row["locate_fee_bp"])

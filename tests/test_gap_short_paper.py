@@ -661,3 +661,16 @@ def test_fetch_asset_flags_parses_200_and_error_dict_on_500(caplog):
     with caplog.at_level("ERROR"):
         assert ll.fetch_asset_flags(s, "LITX") == {"borrow_status": "error", "shortable": None, "easy_to_borrow": None}
     assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_item18_etb_blank_locate_fee_is_info_not_warning(caplog):
+    """2026-11-20 CAPR: an easy-to-borrow name has no locate quote by construction; the BT's advisory LOCATE_BP
+    applies to every trade, so the fallback is correct and must not read as a defect (INFO, not WARNING)."""
+    row = {"date": DAY, "symbol": "CAPR", "qty": "36", "ask_1030": "7.73", "locate_fee_bp": "", "locate_status": "etb"}
+    orders = [{"client_order_id": f"gapshort-{DAY}-CAPR", "filled_avg_price": 8.08, "filled_qty": 36.0},
+              {"client_order_id": f"gapshort-covm-{DAY}-CAPR-1-1", "filled_avg_price": 7.717778, "filled_qty": 36.0}]
+    with caplog.at_level("INFO"):
+        out = gp.score_row(row, orders, None)
+    assert out["net_bp"] == round(R.net_bp(8.08, 7.717778, locate_bp=R.LOCATE_BP), 1)
+    assert not any(r.levelname == "WARNING" and "locate_fee_bp" in r.message for r in caplog.records)
+    assert any(r.levelname == "INFO" and "etb" in r.message and "LOCATE_BP" in r.message for r in caplog.records)
