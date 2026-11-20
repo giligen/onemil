@@ -365,6 +365,7 @@ class HodBreakEngine:
         self._rail_cancel_done: set = set()                    # kill-rail names whose resting-entry cancel sweep already ran this session
         self._last_rail_check = 0.0; self._last_broker_reconcile = 0.0
         self._rail_fail_counts: Dict[str, int] = {}           # kill rail -> passes that left a resting entry order uncancelled (B3)
+        self._adopt_deferred_since: Dict[str, float] = {}      # sym -> first time periodic adoption deferred to a still-tracked resting order (2026-11-20 NBIZ)
         self._warn_ts: Dict[str, float] = {}                  # throttle key -> last WARNING time (one per symbol per minute, B1/B2)
         self._fc_unknown: set = set()                         # symbols the flatten could not verify (positions API error), still registered (B1)
         self._recent_close_ts: Dict[str, float] = {}          # sym -> time.time() of our own exit (F4: adoption must not re-adopt a lagging list)
@@ -443,6 +444,7 @@ class HodBreakEngine:
             self._live_cancel_swept_entry = False; self._live_cancel_swept_flat = False
             self._live_armed_stops.clear(); self._rail_cancel_done.clear(); self._rail_fail_counts.clear()
             self._warn_ts.clear(); self._fc_unknown.clear()
+            self._adopt_deferred_since.clear()
             self._recent_close_ts.clear(); self._our_fills_cache.clear()
             self._fs_tracked.clear(); self._fs_shorts.clear(); self._fs_submitted_today = 0
             self._fs_day_realized_r = 0.0; self._fs_disabled_for_day = False; self._fs_disabled_notified = False
@@ -1582,6 +1584,11 @@ class HodBreakEngine:
             if periodic and time.time() - self._recent_close_ts.get(sym, -1e9) < self.RECENT_CLOSE_S:
                 logger.info(f"{self.tag} {sym}: closed by this book {time.time() - self._recent_close_ts[sym]:.0f}s ago — a lagging broker positions list is not re-adopted")
                 continue                                   # F4: our own exit, broker list not yet updated
+            pending_age = None
+            if periodic and cand is not None and cand.live_order is not None and not cand.live_filled:
+                if self._defer_to_tracked_resting_order(sym, qty, cand):
+                    continue
+                pending_age = time.time() - self._adopt_deferred_since.get(sym, time.time())
             # Review B2: adopt OUR quantity, never the symbol's total broker quantity (foreign shares are the owner's).
             bound = int(existing.get('shares') or 0) if existing is not None else \
                 (int(cand.live_order['qty']) if cand is not None and cand.live_order is not None and cand.live_order.get('qty') else None)
@@ -1648,9 +1655,19 @@ class HodBreakEngine:
                                                 limit_price=entry_px, stop=stop, target=target, level=entry_px, submitted_at=now_ts,
                                                 tp_leg_id='', sl_leg_id='', fill_price=entry_px, filled_at=now_ts, status='open',
                                                 client_order_id='', pattern_data=pattern_data)
-                logger.warning(f"{self.tag} {sym}: ADOPTED {qty} sh unregistered broker position on boot (entry {entry_px:.2f} "
-                                f"stop {stop:.2f}) — filled but never registered by a prior process")
-                self._notify_trade(f"{self.tag} ADOPTED {sym} {qty}sh @ {entry_px:.2f} (unregistered position found on boot)")
+                if pending_age is not None:
+                    oid = (cand.live_order or {}).get('order_id')
+                    logger.warning(f"{self.tag} {sym}: ADOPTED {qty} sh unregistered broker position (entry {entry_px:.2f} stop {stop:.2f}) — "
+                                    f"adopted after {pending_age:.0f}s with resting order {oid} still unresolved")
+                    self._notify_trade(f"{self.tag} ADOPTED {sym} {qty}sh @ {entry_px:.2f} (resting order {oid} unresolved after {pending_age:.0f}s)")
+                elif periodic:
+                    logger.warning(f"{self.tag} {sym}: ADOPTED {qty} sh unregistered broker position on reconcile (entry {entry_px:.2f} "
+                                    f"stop {stop:.2f}) — filled but never registered by this process")
+                    self._notify_trade(f"{self.tag} ADOPTED {sym} {qty}sh @ {entry_px:.2f} (unregistered position found on reconcile)")
+                else:
+                    logger.warning(f"{self.tag} {sym}: ADOPTED {qty} sh unregistered broker position on boot (entry {entry_px:.2f} "
+                                    f"stop {stop:.2f}) — filled but never registered by a prior process")
+                    self._notify_trade(f"{self.tag} ADOPTED {sym} {qty}sh @ {entry_px:.2f} (unregistered position found on boot)")
                 watch_qty, watch_price = qty, entry_px
             if cand is not None and cand.live_order is not None:
                 cand.live_order['trade_id'] = trade_id
@@ -1662,7 +1679,44 @@ class HodBreakEngine:
                 except Exception as e:
                     logger.error(f"{self.tag} {sym}: StopMonitor.add_watch failed for a boot-adopted position — UNMANAGED: {e}")
                     self._notify(f"{self.tag} ERROR add_watch {sym} — UNMANAGED boot-adopted position: {e}")
+            self._adopt_deferred_since.pop(sym, None)
             self.entered_today.add(sym); self.seen_today.add(sym)
+
+    ADOPT_PENDING_ORDER_GRACE_S = 180.0      # three reconcile passes: after this a still-unresolved tracked order no longer blocks adoption
+
+    def _defer_to_tracked_resting_order(self, sym: str, qty: int, cand: Candidate) -> bool:
+        """Periodic reconcile saw a broker long in `sym` while `cand.live_order` (our resting entry) is still tracked and
+        unfilled in the registry. That long is THAT order's fill: GET the order once; a new fill is registered through
+        `_on_live_fill` (the ONE registration path, with safety-net leg ids) and True is returned; no new fill / GET
+        failure defers adoption (True) until `ADOPT_PENDING_ORDER_GRACE_S` has elapsed since the first deferral, after
+        which False is returned and the caller adopts as before. 2026-11-20 NBIZ: adopting here raced the fill poll."""
+        lo = cand.live_order
+        first = self._adopt_deferred_since.setdefault(sym, time.time())
+        st = None; err = None
+        try:
+            st = self.alpaca.get_order(lo['order_id'])
+        except Exception as e:
+            err = e
+        status = str((st or {}).get('status') or '').lower()
+        fq = int((st or {}).get('filled_qty') or 0) if st else 0
+        if err is None and fq > int(lo.get('booked_qty') or 0):
+            logger.warning(f"{self.tag} {sym}: broker reconcile caught the fill of resting order {lo['order_id']} ({fq} sh) before the "
+                            f"fill poll — registering through _on_live_fill, not adopting")
+            self._adopt_deferred_since.pop(sym, None)
+            self._on_live_fill(cand, lo, st, status)
+            return True
+        age = time.time() - first
+        if age > self.ADOPT_PENDING_ORDER_GRACE_S:
+            if err is not None:
+                logger.warning(f"{self.tag} {sym}: GET of resting order {lo['order_id']} failed ({err}) — grace {age:.0f}s exhausted, adopting")
+            return False
+        why = f"GET failed: {err}" if err is not None else status or 'unknown'
+        key = f'adopt-defer-{sym}'; now = time.time(); last = self._warn_ts.get(key)
+        if last is None or now - last >= 60.0:
+            self._warn_ts[key] = now
+            logger.info(f"{self.tag} {sym}: broker long {qty} sh while resting order {lo['order_id']} is still tracked ({why}) — "
+                        f"waiting for the fill poll ({age:.0f}s)")
+        return True
 
     RECENT_CLOSE_S = 120.0
 
@@ -2095,6 +2149,7 @@ class HodBreakEngine:
         filled_qty = int(st.get('filled_qty') or 0)
         if filled_qty <= int(lo.get('booked_qty') or 0):
             return                                            # no NEW shares since the last poll of this same status
+        self._adopt_deferred_since.pop(sym, None)
         fill_px = float(st.get('filled_avg_price') or lo['trigger'])
         stop = lo['stop']; target = round(fill_px + self.params.target_r * (fill_px - stop), 2)
         if self.log_counterfactuals:      # item 2: computed at fill, dry AND live — no print-watch tracking for a live fill (a real broker exit already manages it)
@@ -2273,9 +2328,33 @@ class HodBreakEngine:
             time.sleep(self.oco_retry_delay_s)
             tp_id, sl_id, err = self._submit_safety_net_once(sym, qty, target, sl_px)
             if not sl_id:
+                cov = self._adopt_exit_coverage_stop(sym, err)
+                if cov:
+                    return '', cov
                 logger.error(f"{self.tag} {sym}: safety-net placement for {qty} sh FAILED twice ({err or 'no stop leg id'}) — position has NO broker-side stop")
                 self._notify(f"{self.tag} ERROR SL {sym} — UNPROTECTED POSITION {qty} sh: {err or 'no stop leg id'}")
         return tp_id, sl_id
+
+    def _adopt_exit_coverage_stop(self, sym: str, err: str) -> str:
+        """When the safety net was rejected as 'insufficient qty' (40310000) the shares are held by another live sell: if
+        that is StopMonitor's exit-coverage stop (the watch's sl_leg_id, a live stop/stop_limit) return its id so the
+        caller adopts it as the SL leg; else ''. Any lookup failure returns '' (today's ERROR path, with a WARNING)."""
+        if self.stop_monitor is None or not ('40310000' in (err or '') or 'insufficient qty' in (err or '').lower()):
+            return ''
+        try:
+            snap = self.stop_monitor.get_watch_snapshot(sym)
+            cov = str((snap or {}).get('sl_leg_id') or '')
+            if not cov:
+                return ''
+            st = self.alpaca.get_order(cov) or {}
+            if str(st.get('status') or '').lower() in ('new', 'accepted', 'pending_new', 'held') \
+                    and str(st.get('type') or '').lower() in ('stop', 'stop_limit'):
+                logger.warning(f"{self.tag} {sym}: safety net not placed — the shares are held by exit-coverage stop {cov[:8]} "
+                                f"@ {st.get('stop_price')}; adopting it as the SL leg")
+                return cov
+        except Exception as e:
+            logger.warning(f"{self.tag} {sym}: could not verify an exit-coverage stop holding the shares ({e}) — treating the safety net as failed")
+        return ''
 
     def _append_live_parity_row(self, cand: Candidate, lo: dict, broker_status: str, broker_fill_ts=None,
                                 broker_fill_px: Optional[float] = None, broker_fill_qty: Optional[int] = None, reason: str = '') -> None:
