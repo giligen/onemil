@@ -4816,6 +4816,10 @@ class ORBEngine:
                             f"[ORB PREPLACE] {sym}: provisional order {pos.order_id} still '{_status}' "
                             f"after the cancel wait — NO replacement submitted today (unknown first order)")
                         continue
+                if pos is not None and pos.trade_id:
+                    # provisional order is confirmed terminal with nothing filled: its row is dead
+                    # whatever the replacement does next (2026-11-20 SNK/SSPC/SPCQ stayed pending_new)
+                    self._mark_preplace_row_canceled(pos, 'preplace_replaced')
                 if sym in self.open_positions:
                     del self.open_positions[sym]
                 rvol_tilt_mult, rvol_tercile = self._get_rvol_tilt_mult(final_cand)
@@ -4924,9 +4928,20 @@ class ORBEngine:
             logger.warning(f"[ORB PREPLACE] {sym}: cancel at reconcile but {filled_qty} sh already "
                            f"filled — row NOT marked canceled, fill path owns it")
             return False
-        self.db.update_trade(pos.trade_id, {'order_status': 'preplace_canceled',
-                                            'exit_reason': 'preplace_reconcile'})
+        self._mark_preplace_row_canceled(pos, 'preplace_reconcile')
         return True
+
+    def _mark_preplace_row_canceled(self, pos, reason: str) -> None:
+        """Write the terminal status of a provisional preplace order's trades row:
+        `order_status='preplace_canceled'`, `exit_reason=reason` (`preplace_reconcile` = dropped from
+        the final set, `preplace_replaced` = range high moved). One write site; a DB failure logs
+        ERROR and never raises into the reconcile."""
+        try:
+            self.db.update_trade(pos.trade_id, {'order_status': 'preplace_canceled',
+                                                'exit_reason': reason})
+        except Exception as exc:
+            logger.error(f"[ORB PREPLACE] {pos.symbol}: could not mark trades row {pos.trade_id} "
+                         f"preplace_canceled/{reason}: {exc}")
 
     def _log_submit_timing(self, plan, result, decision_ts: float, http_start: float, http_end: float,
                            path: Optional[str], quote_ms: Optional[float], size_ms: Optional[float]) -> None:
