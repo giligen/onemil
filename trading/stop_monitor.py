@@ -62,6 +62,7 @@ from trading.orb_target_limit import CANCEL_ACK_WAIT_S, CancelOutcome, cancel_re
 logger = logging.getLogger(__name__)
 
 _SCALE_ATTEMPT_MIN_INTERVAL_S = 30.0   # D1: min seconds between scale submissions per symbol
+_BOOKED_EXIT_TTL_S = 600.0             # a booked-exit record this young excuses a late target poll (2026-11-20)
 _SCALE_MAX_FAILS = 3                   # consecutive scale failures before the scale is disarmed
 
 RECONNECT_DELAY_SECONDS = 60.0  # 60s between retries — stop triggering Alpaca's rate limiter
@@ -741,6 +742,8 @@ class StopMonitor:
         self._watch_lock = threading.Lock()  # protects both _watches and _quote_watches
 
         self._exit_events: queue.Queue = queue.Queue()
+        # symbol -> (exit_reason, qty, fill_price, booked_at); guarded by _watch_lock (2026-11-20)
+        self._booked_exits: Dict[str, tuple] = {}
         self._exit_in_progress: Dict[str, bool] = {}
         # GLXG 2026-06-11 fix: race guard between sync_closed_positions and
         # _execute_stop_exit. trading_engine._sync_closed_positions polls open
@@ -961,6 +964,12 @@ class StopMonitor:
             logger.error(f"EXIT COVERAGE: {symbol} broker is flat but the last filled sell "
                          f"({filled_at}) predates this watch — row NOT booked, watch kept; book it by hand")
             return False
+        tp_id = str(getattr(watch, "tp_leg_id", "") or "")
+        if getattr(watch, "target_resting", False) and tp_id and str(fill.get("id") or "") == tp_id:
+            logger.info(f"[ORB TP] {symbol} target FILLED (exit coverage) — {watch.shares}sh "
+                        f"@ ${px:.4f} (limit ${float(watch.target_price or 0.0):.2f}, order {tp_id[:8]})")
+            return self._queue_target_rested_event(
+                symbol, watch, watch.shares, px, float(watch.target_price or 0.0), tp_id)
         logger.info(f"EXIT COVERAGE: {symbol} closed externally — booking {watch.shares} sh "
                     f"@ {px:.4f} (order {str(fill.get('id', ''))[:8]}), watch removed")
         self._emit_stop_exit_event(
@@ -1987,34 +1996,59 @@ class StopMonitor:
         with self._watch_lock:
             watch = self._watches.get(symbol)
             if watch is None:
+                rec = self._booked_exits.get(symbol)
+                if (rec and rec[0] == ExitReason.TARGET_RESTED.value
+                        and time_mod.time() - rec[3] < _BOOKED_EXIT_TTL_S):
+                    logger.info(
+                        f"[ORB TP] {symbol} target fill already booked by exit coverage "
+                        f"({rec[1]}sh @ ${rec[2]:.4f}) — nothing to do")
+                    return True
                 logger.warning(
                     f"StopMonitor: book_target_rested_fill({symbol}) — no "
-                    f"active watch (already retired by a race?); DB write "
-                    f"skipped, sync_positions will reconcile"
+                    f"active watch and no recent target booking (already retired by a race?); "
+                    f"DB write skipped"
                 )
                 return False
-            trade_db_id = watch.trade_db_id
-            strategy = watch.strategy
-            stop_price = watch.stop_price
-            self._watches.pop(symbol, None)
         logger.info(
             f"[ORB TP] {symbol} target FILLED (order stream) — {filled_qty}sh "
             f"@ ${fill_price:.2f} (limit ${limit_price:.2f})"
         )
+        return self._queue_target_rested_event(symbol, watch, filled_qty, fill_price, limit_price, '')
+
+    def _queue_target_rested_event(
+        self, symbol: str, watch: "WatchEntry", filled_qty: int, fill_price: float,
+        limit_price: float, order_id: str,
+    ) -> bool:
+        """Claim the watch, then queue the TARGET_RESTED exit event and record the booking.
+
+        Shared by the order-stream path (`book_target_rested_fill`) and the exit-coverage path
+        (`_book_external_flat`) so both emit the identical event. The watch is popped FIRST, under
+        `_watch_lock`, together with the `_booked_exits` write: the two paths run on different
+        threads and both may hold a reference to the same watch, so whichever pops it books the
+        exit and the other sees None and queues nothing (one fill, one event, one DB write).
+        Returns False (WARNING) when the watch was already retired by the other path."""
+        with self._watch_lock:
+            if self._watches.pop(symbol, None) is None:
+                logger.warning(
+                    f"[ORB TP] {symbol} watch already retired while booking the target fill "
+                    f"({filled_qty}sh @ ${fill_price:.4f}) — event NOT queued, the other path booked it")
+                return False
+            self._booked_exits[symbol] = (
+                ExitReason.TARGET_RESTED.value, filled_qty, fill_price, time_mod.time())
         self._exit_events.put(StopExitEvent(
             symbol=symbol,
-            stop_price=stop_price,
+            stop_price=watch.stop_price,
             exit_price=fill_price,
             shares=filled_qty,
-            order_id='',
+            order_id=order_id,
             exit_reason=ExitReason.TARGET_RESTED.value,
             exit_branch=ExitBranch.LIMIT.value,
-            trade_db_id=trade_db_id,
+            trade_db_id=watch.trade_db_id,
             submitted_at=time_mod.time(),
             pricing_method='target_rested_limit',
             filled_qty=filled_qty,
             exit_limit_price=limit_price,
-            strategy=strategy,
+            strategy=watch.strategy,
             confirmed=True,
         ))
         with self._exit_lock:
@@ -2902,6 +2936,8 @@ class StopMonitor:
                 'scale_qty': w.scale_qty,
                 'scale_done': w.scale_done,
                 'scale_order_id': w.scale_order_id,
+                'sl_leg_id': w.sl_leg_id,
+                'tp_leg_id': w.tp_leg_id,
             }
 
     def execute_partial_exit(
@@ -4817,6 +4853,7 @@ class StopMonitor:
         )
         self._exit_events.put(event)
         with self._watch_lock:
+            self._booked_exits[symbol] = (exit_reason, qty, exit_price, time_mod.time())
             self._watches.pop(symbol, None)
         with self._exit_lock:
             self._exit_in_progress[symbol] = False

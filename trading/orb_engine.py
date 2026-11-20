@@ -7025,8 +7025,8 @@ class ORBEngine:
                     logger.error(
                         f"ORB: {symbol} book_target_rested_fill failed for "
                         f"an order-stream-confirmed FULL fill ({pos.shares}sh "
-                        f"@ ${fill_price:.2f}) — DB row will be reconciled by "
-                        f"the next sync_positions pass instead"
+                        f"@ ${fill_price:.2f}) — row NOT booked by this path — check "
+                        f"the row by hand (sync_positions runs at boot only)"
                     )
             else:  # 'partially_filled' — book only the NEW shares, keep watching
                 booked = self.stop_monitor.book_target_partial_fill(
