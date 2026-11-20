@@ -38,9 +38,11 @@ import eod_sections as es  # noqa: E402  (ONE parser for the engine log; ONE BT 
 logger = logging.getLogger("orb_pick_parity")
 
 REASONS = ("universe_live_only", "universe_bt_only", "veto_input_range", "veto_input_pdr", "param_ts_mismatch",
-           "addon_pool", "provisional_fill", "no_fill", "range_missing", "time_stop_leak", "slot_displaced", "unexplained")
+           "addon_pool", "provisional_fill", "no_fill", "range_missing", "time_stop_leak", "slot_displaced", "bar_revision", "unexplained")
 RANKING_ORDER = ("Q4", "Q5", "Q3", "Q2", "Q1")   # orb.yaml ranking.order (engine `self.ranking_order`): quintile, then composite DESC
 NOT_IN_TOPK_DETAIL = "ranged live, not in the live final top-K, composite not comparable"
+HARD_COMP_DRIFT = 0.05                # docs/orb_rollout_plan.md: composite drift held < 0.05; above it = a different data source
+LIVE_FEATURE_KEYS = es.LIVE_FEATURE_KEYS   # `ORB SCORED` key -> (features-CSV column, logged decimals)
 COMP_TOL = 1e-4                       # |live comp - BT comp| per shared name
 JOURNAL_WINDOW_UTC = ("13:30", "16:30")   # covers 09:30-12:30 ET in both EDT and EST
 TRADES_DB = ROOT / "data" / "trades.db"
@@ -100,6 +102,7 @@ def parse_live(text: str) -> Dict:
         prov.update(re.findall(r"'([A-Z][A-Z0-9.]*)'", m.group(1)))
     return {"final": sorted(p["final_ranked"]), "provisional": sorted(prov),
             "submitted": sorted(p["submitted"]), "scored": {s: (c, q) for s, (c, q, _) in p["scored_any"].items()},
+            "features": p.get("scored_feats", {}),
             "range_done": sorted(p["range_done"]), "final_ranges": parse_final_ranges(text),
             "vetoes": parse_live_vetoes(text), "notes": p["notes"], "seen": text,
             "has_reconcile": "reconcile final top-" in text}
@@ -163,6 +166,34 @@ def pit_refit_ts(day: str) -> Tuple[Optional[str], str]:
 
 
 # ------------------------------------------------------------------ comparison
+def feature_revisions(live_feats: Dict[str, float], bt_feats: Dict[str, float]) -> List[str]:
+    """Composite inputs whose live value differs from the BT value by more than the live log's rounding (half a unit of
+    the last logged decimal + 1e-9): strings like `range_total_volume 125552 vs 125652`. [] when all match."""
+    out: List[str] = []
+    for _, (col, dec) in LIVE_FEATURE_KEYS.items():
+        lv, bv = (live_feats or {}).get(col), (bt_feats or {}).get(col)
+        if lv is None or bv is None:
+            continue
+        if abs(lv - bv) > 0.5 * 10 ** (-dec) + 1e-9:
+            out.append(f"{col} {lv:.0f} vs {bv:.0f}" if dec == 0 else f"{col} {lv:.6g} vs {bv:.6g}")
+    return out
+
+
+def _shared_drift(s: str, live: Dict, bt: Dict, ts_ok: bool, ts_detail: str) -> Dict:
+    """The difference of a shared-name composite drift > COMP_TOL: `param_ts_mismatch` on a timestamp mismatch;
+    `bar_revision` when the drift is <= HARD_COMP_DRIFT and a composite input differs between the live log and the
+    rebuilt features row; else `unexplained`."""
+    lc, bc = live["scored"][s][0], bt["comp"][s][0]
+    base = f"live comp {lc:.4f} vs BT {bc:.4f}; {ts_detail}"
+    if not ts_ok:
+        return _diff(s, "both", "param_ts_mismatch", base)
+    revs = feature_revisions(live.get("features", {}).get(s, {}), bt.get("features", {}).get(s, {}))
+    if revs and abs(lc - bc) <= HARD_COMP_DRIFT:
+        return _diff(s, "both", "bar_revision",
+                     f"live comp {lc:.4f} vs BT {bc:.4f}; inputs revised after the 09:35 snapshot: {', '.join(revs)}")
+    return _diff(s, "both", "unexplained", base)
+
+
 def _diff(symbol: str, side: str, reason: str, detail: str) -> Dict:
     """One named difference; `reason` must be one of REASONS."""
     assert reason in REASONS, reason
@@ -258,8 +289,7 @@ def compare(day: str, bt: Optional[Dict], live: Dict, fills: Dict[str, Dict], bo
     for s in sorted(B & L):
         lc = live["scored"].get(s)
         if lc and abs(lc[0] - bt["comp"][s][0]) > COMP_TOL:
-            diffs.append(_diff(s, "both", "param_ts_mismatch" if not ts_ok else "unexplained",
-                               f"live comp {lc[0]:.4f} vs BT {bt['comp'][s][0]:.4f}; {ts_detail}"))
+            diffs.append(_shared_drift(s, live, bt, ts_ok, ts_detail))
     bt_only = {s: _bt_only_reason(s, live, bt, ts_ok, ts_detail) for s in sorted(B - L)}
     _reclassify_slot_displaced(bt_only, live, [s for s in sorted(L - B) if s not in bt["day_symbols"]])
     diffs.extend(bt_only.values())

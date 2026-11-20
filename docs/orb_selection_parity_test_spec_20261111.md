@@ -57,3 +57,9 @@ only) — paste the two summary lines in the RESULT.
 ## Output
 `docs/orb_selection_parity_test_20261111_RESULT.md` ≤ 200 words: file:line, the two real summary lines, test counts,
 the cron/ordering finding. Return ≤ 100 words.
+
+## Amendment 2026-11-20
+The 1e-4 composite rule stands. A shared-name drift <= 0.05 whose composite inputs differ in the live `ORB SCORED` line
+vs the rebuilt features row (beyond the log's rounding) carries the reason `bar_revision`, naming the inputs: a vendor
+bar revision landed after the 09:35 snapshot (MUZ 2026-11-16: range volume +100 shares, range close position 0.939 vs
+0.9405). Drift with identical inputs, or > 0.05, stays `unexplained`. `bt_only` / `live_only` names are unchanged.

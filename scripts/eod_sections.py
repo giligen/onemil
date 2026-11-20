@@ -608,6 +608,23 @@ def preplace_dropped(parsed: Dict, rows: List[Dict]) -> set:
     return (set(parsed.get("preplace_failed", ())) | cancelled) - set(parsed.get("final_ranked", ()))
 
 
+# `ORB SCORED` feature key -> (features-CSV column, logged decimals); trading/orb_engine.py logs them with these formats
+LIVE_FEATURE_KEYS = {"gap": ("gap_pct", 3), "rtv": ("range_total_volume", 0), "rabr": ("range_avg_bar_range_pct", 3),
+                     "rs": ("range_size_pct", 3), "p20h": ("price_vs_20d_high_pct", 3),
+                     "pdcp": ("prev_day_close_position", 3), "rcp": ("range_close_position", 3)}
+
+
+def parse_scored_features(line: str) -> Dict[str, float]:
+    """{features-CSV column: value} from the `gap=.. rtv=.. ... rcp=..` block of one `ORB SCORED` line.
+    {} for an old-format line without the block; a partially present block returns what parsed (never raises)."""
+    out: Dict[str, float] = {}
+    for key, (col, _) in LIVE_FEATURE_KEYS.items():
+        m = re.search(rf"(?<![\w]){key}=(-?[\d.]+|nan)\b", line)
+        if m and m.group(1) != "nan":
+            out[col] = float(m.group(1))
+    return out
+
+
 def parse_orb_log(text: str) -> Dict:
     """Counts from an ORB session-archive text. `scored` = symbols of `ORB SCORED` lines stamped inside the
     09:34-09:40 ET window (the 09:35 decision); `late` = SCORED symbols outside it (a restart, not a decision);
@@ -638,12 +655,17 @@ def parse_orb_log(text: str) -> Dict:
         else:
             late.add(m0.group(1))
     scored_any, range_done, preplace, notes = {}, {}, None, {}
+    scored_feats: Dict[str, Dict[str, float]] = {}
     for ln in lines:
         stamp = _STAMP_RE.search(ln)
         hhmmss = stamp.group(2) if stamp else "?"
         m = re.search(r"ORB SCORED: (\S+) comp=([-\d.]+) (Q\d)?", ln)
         if m and m.group(3) and _is_production_scored(ln):
-            scored_any.setdefault(m.group(1), (float(m.group(2)), m.group(3), hhmmss))
+            if m.group(1) not in scored_any:
+                scored_any[m.group(1)] = (float(m.group(2)), m.group(3), hhmmss)
+                feats = parse_scored_features(ln)
+                if feats:
+                    scored_feats[m.group(1)] = feats
         m = re.search(r"ORB: (\S+) range complete", ln)
         if m:
             range_done.setdefault(m.group(1), hhmmss)
@@ -684,7 +706,7 @@ def parse_orb_log(text: str) -> Dict:
                 boots.append(m.group(2)[:5])
     return {"scored": sorted(scored), "late": sorted(late - scored), "boots": boots, "addon": sorted(addon - scored),
             "detail": detail, "first_et": first_et[:5] if first_et else None,
-            "scored_any": scored_any, "range_done": range_done, "preplace": preplace, "notes": notes,
+            "scored_any": scored_any, "scored_feats": scored_feats, "range_done": range_done, "preplace": preplace, "notes": notes,
             "preplace_ranked": sorted(preplace_ranked), "submitted": sorted(submitted),
             "final_ranked": sorted(final_ranked), "preplace_failed": sorted(preplace_failed),
             "p1_scored": sorted(p1_scored), "p1_detail": p1_detail,
@@ -798,6 +820,8 @@ def bt_ranked(day: str, features_csv: Optional[str] = None, n: Optional[int] = N
                 "vetoes": vetoes, "day_symbols": sorted(set(g["symbol"])),
                 "scored_field": [r.symbol for _, r in k.iterrows()],
                 "range_size": {r.symbol: float(r.range_size_pct) for r in sel},
+                # the seven composite inputs of every row of the day (bar-revision check, orb_pick_parity)
+                "features": {r["symbol"]: {f: float(r[f]) for f in need} for r in g.to_dict("records")},
                 "params_refit_ts": pp.refit_ts, "params_source": pp.source}, ""
     except Exception as e:  # noqa: BLE001
         log.warning("bt_ranked failed: %s", e, exc_info=True)
