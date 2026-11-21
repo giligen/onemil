@@ -48,6 +48,7 @@ FIELDS = ['date', 'bt_names_match', 'bt_ret', 'paper_ret', 'live_ret', 'spy_ret'
 N_WEEKS = 8
 NAMES_MIN = 18                 # of 20
 RESID_MAX_PP = 2.0
+SEAM_TOL = 0.005               # |ext/panel close - 1| at the seam above this = a restatement, rescale the panel
 STALE_DAYS = 6                 # extension last bar older than this (calendar days) = the Saturday refresh did not run
 TG_PREFIX = '[MOM]'
 SLEEVE_START_EQUITY = 20000.0  # the paper slice (scripts/eod_sections.SLEEVE_START_EQUITY)
@@ -62,9 +63,44 @@ def load_rule_module():
     return R
 
 
+def rescale_seam(data: Dict, ext: pd.DataFrame, tol: float = SEAM_TOL) -> Dict[str, float]:
+    """Put the frozen RAW panel on the extension's scale at the seam, in place.  The extension is fetched with
+    adjustment=ALL, so a split/dividend after the panel's end restates the symbol's WHOLE extension history while the
+    panel keeps raw prices: appended unscaled, a split reads as a one-day crash.  For each symbol in ``data`` with
+    extension rows, ratio = ext close / panel close on the symbol's last panel date; when |ratio - 1| > ``tol`` the
+    panel's OHLC are multiplied by it and volume divided.  A symbol with no extension bar on that date is left
+    unscaled (WARNING).  Returns {symbol: ratio} for the rescaled symbols."""
+    ratios: Dict[str, float] = {}
+    for sym, g in ext.groupby('symbol', sort=False):
+        if sym not in data:
+            continue
+        d, o, h, l, c, v = data[sym]
+        last = pd.Timestamp(d[-1])
+        hit = g.loc[g['bar_date'] == last, 'close']
+        if hit.empty:
+            if (g['bar_date'] > last).any():
+                logger.warning("MOM parity seam: %s has extension rows but no extension bar on its last panel date "
+                               "%s; appended UNSCALED (a split after the panel end would read as a crash)",
+                               sym, last.date())
+            continue
+        ratio = float(hit.iloc[0]) / float(c[-1]) if c[-1] else float('nan')
+        if not math.isfinite(ratio) or ratio <= 0 or abs(ratio - 1) <= tol:
+            continue
+        data[sym] = (d, o * ratio, h * ratio, l * ratio, c * ratio, v / ratio)
+        ratios[sym] = ratio
+    if ratios:
+        big = sum(1 for r in ratios.values() if abs(r - 1) > 0.05)
+        top = sorted(ratios.items(), key=lambda kv: -abs(math.log(kv[1])))[:5]
+        logger.info("MOM parity seam: rescaled %d symbols onto the extension scale (%d by > 5 %%); most extreme: %s",
+                    len(ratios), big, ', '.join(f"{s} x{r:.4f}" for s, r in top))
+    return ratios
+
+
 def extend_data(data: Dict, ext: pd.DataFrame) -> int:
-    """Append extension bars (bar_date after each symbol's last panel date) to the loaded panel dict, in place.
+    """Append extension bars (bar_date after each symbol's last panel date) to the loaded panel dict, in place,
+    after ``rescale_seam`` aligns the raw panel with the adjustment=ALL extension.
     Returns the number of appended rows."""
+    rescale_seam(data, ext)
     n_add = 0
     for sym, g in ext.groupby('symbol', sort=False):
         if sym not in data:
@@ -93,8 +129,9 @@ def monday_rebalances(cal: pd.DatetimeIndex, n: int) -> List[pd.Timestamp]:
 
 def bt_weeks(R, data: Dict, n: int = N_WEEKS) -> List[Dict]:
     """Guarded top-20 (REBUILD_1700tu.features, same selection as its main()) and the BT week return for the last
-    ``n`` Mondays: {monday, signal, names, ret, spy_ret, end, complete}.  Return = equal weight, Monday open ->
-    last close before the next Monday (or the last bar for the running week), before cost."""
+    ``n`` Mondays: {monday, signal, names, ret, spy_ret, end, complete}.  Return = equal weight, last close before
+    Monday -> last close before the next Monday (or the last bar for the running week), before cost; the same
+    window as ``paper_week_ret`` (the weekend gap is part of the week)."""
     cal = pd.DatetimeIndex(data['SPY'][0])
     rebs = monday_rebalances(cal, n)
     ts = np.array([cal[cal.searchsorted(r) - 1] for r in rebs], dtype='datetime64[ns]')
@@ -105,8 +142,9 @@ def bt_weeks(R, data: Dict, n: int = N_WEEKS) -> List[Dict]:
         names = [x[0] for x in elig[:R.TOPN]] if len(rows[i]) >= R.TOPN else []
         complete = i + 1 < len(rebs)
         end = cal[cal.searchsorted(rebs[i + 1]) - 1] if complete else cal[-1]
-        rets = [R.px(data, s, end, False) / R.px(data, s, reb, True) - 1 for s in names]
-        spy = R.px(data, 'SPY', end, False) / R.px(data, 'SPY', reb, True) - 1
+        prev = cal[cal.searchsorted(reb) - 1]
+        rets = [R.px(data, s, end, False) / R.px(data, s, prev, False) - 1 for s in names]
+        spy = R.px(data, 'SPY', end, False) / R.px(data, 'SPY', prev, False) - 1
         out.append({'monday': reb, 'signal': pd.Timestamp(ts[i]), 'names': names,
                     'ret': float(np.nanmean(rets)) if rets else float('nan'), 'spy_ret': float(spy),
                     'end': end, 'complete': complete})
