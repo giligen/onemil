@@ -266,7 +266,7 @@ def test_drawdown_rail_liquidates_pauses_and_refuses_next_run(world, capsys):
     assert all('-s' in k for k in b.orders)                                  # sells only, no buys
     msg = notifier.send_message_sync.call_args[0][0]
     assert 'PAUSED' in msg and 'RAIL:' in msg
-    assert '<' not in msg   # 2026-11-23: a bare '<' breaks Telegram HTML parse mode (fell back to plain text)
+    assert '<=' not in msg and 'at or below' in msg   # 2026-11-23: the bare '<' of '<=' broke Telegram HTML parse mode
     n_orders = len(b.orders)
     assert runner.run(args(submit=True), c, notifier, NOW) == 3             # refuses until the flag is cleared
     assert len(b.orders) == n_orders and 'PAUSED' in capsys.readouterr().out

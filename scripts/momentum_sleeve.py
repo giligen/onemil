@@ -1057,7 +1057,7 @@ def submit_live(args, client, notifier, state, orders, prices, feat, panel, asof
     dd = eq_after / state['peak_equity'] - 1.0
     if rail:
         state['paused'] = True
-        state['paused_reason'] = (f"drawdown rail {today}: sleeve equity ${eq_after:,.0f} <= "
+        state['paused_reason'] = (f"drawdown rail {today}: sleeve equity ${eq_after:,.0f} at or below "
                                   f"{ml.DD_PAUSE_FRAC:.0%} of ${state['equity_start']:,.0f}")
         notes.append(f"PAUSED -- {state['paused_reason']}; clear with: {ml.PAUSE_CLEAR_CMD}")
     save_state(state, paths['state'])
