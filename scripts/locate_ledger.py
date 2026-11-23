@@ -16,6 +16,8 @@ import sqlite3
 import statistics
 import subprocess
 import sys
+import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -30,6 +32,8 @@ logger = logging.getLogger("locate_ledger")
 
 BASE_URL = "https://api.alpaca.markets"
 LOCATE_BATCH = 25
+ASSET_GET_MIN_INTERVAL_S = 0.35  # per-symbol asset GET pacing (<= ~170/min; Alpaca 429'd 607 sequential GETs on 11/23)
+ASSET_GET_RETRIES = 3
 MIN_GAP_PCT = 10.0
 MIN_PRICE = 1.0
 MIN_DOLLAR_VOL = 1_000_000.0
@@ -40,6 +44,7 @@ SCORED = _REPO / "logs" / "locate_ledger_scored.csv"
 LEDGER_COLUMNS = ["date", "time_utc", "symbol", "prev_close", "pm_price", "gap_pct", "pm_vol", "borrow_status",
                   "locate_status", "fee_per_share", "fee_bp_of_price", "available_qty"]
 SCORED_COLUMNS = LEDGER_COLUMNS + ["open", "close", "high", "low", "fade_bp"]
+_last_asset_get = 0.0  # monotonic time of the last per-symbol asset GET
 _ERR_CODES = {"easy_to_borrow": "etb", "threshold_security": "threshold", "symbol_not_found": "not_found"}
 
 
@@ -128,23 +133,92 @@ def fetch_locates(session, symbols: list) -> dict:
     return out
 
 
-def fetch_asset_flags(session, symbol: str) -> dict:
-    """One GET /v2/assets/{symbol} -> {borrow_status, shortable, easy_to_borrow}; error dict (+ERROR log) on any failure."""
+def _pace_asset_get() -> None:
+    """Sleep so consecutive per-symbol asset GETs are at least ASSET_GET_MIN_INTERVAL_S apart."""
+    global _last_asset_get
+    wait = _last_asset_get + ASSET_GET_MIN_INTERVAL_S - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    _last_asset_get = time.monotonic()
+
+
+def _retry_delay(resp, attempt: int) -> float:
+    """Seconds to wait after HTTP 429: the Retry-After header when parseable, else 2^attempt."""
+    ra = (getattr(resp, "headers", None) or {}).get("Retry-After")
     try:
-        r = session.get(f"{BASE_URL}/v2/assets/{symbol}", timeout=15)
+        return max(0.0, float(ra)) if ra is not None else float(2 ** attempt)
+    except (TypeError, ValueError):
+        logger.warning("unparseable Retry-After %r - using 2^%d s", ra, attempt)
+        return float(2 ** attempt)
+
+
+def fetch_asset_table(session) -> dict:
+    """ONE GET /v2/assets?status=active&asset_class=us_equity -> {symbol: {borrow_status, shortable, easy_to_borrow}}.
+
+    On any failure logs WARNING and returns {} (callers then fall back to the paced per-symbol GET).
+    """
+    try:
+        r = session.get(f"{BASE_URL}/v2/assets", params={"status": "active", "asset_class": "us_equity"}, timeout=60)
         if r.status_code != 200:
             raise RuntimeError(f"HTTP {r.status_code}")
-        body = r.json()
-        return {"borrow_status": body.get("borrow_status") or "unknown", "shortable": body.get("shortable"),
-                "easy_to_borrow": body.get("easy_to_borrow")}
+        return {a["symbol"]: {"borrow_status": a.get("borrow_status") or "unknown", "shortable": a.get("shortable"),
+                              "easy_to_borrow": a.get("easy_to_borrow")} for a in r.json() if a.get("symbol")}
     except Exception as e:  # noqa: BLE001
-        logger.error("asset borrow_status failed for %s: %s", symbol, e)
-        return {"borrow_status": "error", "shortable": None, "easy_to_borrow": None}
+        logger.warning("asset table fetch failed (%s) - falling back to per-symbol GETs", e)
+        return {}
 
 
-def fetch_borrow_status(session, symbol: str) -> str:
-    """borrow_status from GET /v2/assets/{symbol}; 'error' (+ERROR log) on any failure."""
-    return fetch_asset_flags(session, symbol)["borrow_status"]
+def fetch_asset_flags(session, symbol: str) -> dict:
+    """GET /v2/assets/{symbol}, paced, retrying HTTP 429 -> {borrow_status, shortable, easy_to_borrow, reason}.
+
+    Failure returns borrow_status 'error' with reason ('HTTP 429' or other text) and logs WARNING only;
+    run_ledger aggregates failures into one ERROR.
+    """
+    reason = "unknown"
+    for attempt in range(ASSET_GET_RETRIES + 1):
+        resp = None
+        try:
+            _pace_asset_get()
+            resp = session.get(f"{BASE_URL}/v2/assets/{symbol}", timeout=15)
+            if resp.status_code == 429:
+                reason = "HTTP 429"
+                if attempt < ASSET_GET_RETRIES:
+                    logger.warning("asset %s: HTTP 429, retry %d/%d", symbol, attempt + 1, ASSET_GET_RETRIES)
+                    time.sleep(_retry_delay(resp, attempt))
+                    continue
+                break
+            if resp.status_code != 200:
+                raise RuntimeError(f"HTTP {resp.status_code}")
+            body = resp.json()
+            return {"borrow_status": body.get("borrow_status") or "unknown", "shortable": body.get("shortable"),
+                    "easy_to_borrow": body.get("easy_to_borrow"), "reason": ""}
+        except Exception as e:  # noqa: BLE001
+            reason = str(e)
+            break
+    logger.warning("asset borrow_status failed for %s: %s", symbol, reason)
+    return {"borrow_status": "error", "shortable": None, "easy_to_borrow": None, "reason": reason}
+
+
+def resolve_borrow(session, symbol: str, table=None) -> tuple:
+    """(borrow_status, failure_reason): table hit -> no GET; miss -> the paced per-symbol GET. reason '' on success."""
+    if table and symbol in table:
+        return table[symbol]["borrow_status"], ""
+    f = fetch_asset_flags(session, symbol)
+    return f["borrow_status"], f["reason"]
+
+
+def fetch_borrow_status(session, symbol: str, table=None) -> str:
+    """borrow_status from the asset table when present, else GET /v2/assets/{symbol}; 'error' (+WARNING) on failure."""
+    return resolve_borrow(session, symbol, table)[0]
+
+
+def log_borrow_failures(failures: dict, total: int) -> None:
+    """ONE aggregated ERROR for all symbols whose borrow_status failed (symbol -> reason); nothing when empty."""
+    if not failures:
+        return
+    n429 = sum(1 for v in failures.values() if v == "HTTP 429")
+    logger.error("locate ledger: borrow_status failed for %d of %d gappers (HTTP 429 x %d, other x %d): first 10 symbols %s",
+                 len(failures), total, n429, len(failures) - n429, list(failures)[:10])
 
 
 def build_row(date: str, time_utc: str, g: dict, borrow_status: str, loc: dict) -> dict:
@@ -191,8 +265,10 @@ def summary_line(rows: list) -> str:
     cnt = lambda k: sum(1 for r in rows if r["locate_status"] == k)  # noqa: E731
     fees = [float(r["fee_bp_of_price"]) for r in rows if r["locate_status"] == "quoted" and r["fee_bp_of_price"] != ""]
     med = f"{statistics.median(fees):.1f}" if fees else "n/a"
+    nerr = sum(1 for r in rows if r.get("borrow_status") == "error")
+    err = f", error {nerr}" if nerr else ""
     return (f"LOCATE LEDGER: {len(rows)} gappers, {cnt('etb')} etb / {cnt('quoted')} quoted / "
-            f"{cnt('threshold')} threshold, median fee {med} bp")
+            f"{cnt('threshold')} threshold, median fee {med} bp{err}")
 
 
 def run_ledger(dry_run: bool, at: str | None, session=None, client=None) -> int:
@@ -212,7 +288,14 @@ def run_ledger(dry_run: bool, at: str | None, session=None, client=None) -> int:
     date = now.strftime("%Y-%m-%d")
     t = f"{at[:2]}:{at[2:]}:00" if at else now.strftime("%H:%M:%S")
     locs = fetch_locates(session, [g["symbol"] for g in gappers])
-    rows = [build_row(date, t, g, fetch_borrow_status(session, g["symbol"]), locs[g["symbol"]]) for g in gappers]
+    table = fetch_asset_table(session) if gappers else {}
+    rows, failures = [], {}
+    for g in gappers:
+        bs, why = resolve_borrow(session, g["symbol"], table)
+        if why:
+            failures[g["symbol"]] = why
+        rows.append(build_row(date, t, g, bs, locs[g["symbol"]]))
+    log_borrow_failures(failures, len(gappers))
     logger.info(summary_line(rows))
     if dry_run:
         for r in rows[:10]:
@@ -220,6 +303,39 @@ def run_ledger(dry_run: bool, at: str | None, session=None, client=None) -> int:
         return 0
     logger.info("appended %d new rows to %s", append_rows(LEDGER, rows), LEDGER)
     return 0
+
+
+def repair_borrow(day: str, path=None, session=None, table=None) -> dict:
+    """Re-fetch borrow_status for `day`'s 'error' rows and rewrite ONLY that field in place (atomic temp + os.replace).
+
+    Returns {repaired, total, still_error}; rows that still fail stay 'error'. No other field or row changes.
+    """
+    path = Path(path or LEDGER)
+    with path.open(newline="") as f:
+        rd = csv.DictReader(f)
+        cols, rows = rd.fieldnames, list(rd)
+    targets = [r for r in rows if r["date"] == day and r["borrow_status"] == "error"]
+    if not targets:
+        logger.info("repaired 0 of 0 error rows for %s; still error: 0", day)
+        return {"repaired": 0, "total": 0, "still_error": 0}
+    session = session or make_session()
+    table = fetch_asset_table(session) if table is None else table
+    for r in targets:
+        r["borrow_status"] = fetch_borrow_status(session, r["symbol"], table)
+    still = sum(1 for r in targets if r["borrow_status"] == "error")
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            w.writerows(rows)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    logger.info("repaired %d of %d error rows for %s; still error: %d", len(targets) - still, len(targets), day, still)
+    return {"repaired": len(targets) - still, "total": len(targets), "still_error": still}
 
 
 def score_rows(rows: list, snaps: dict) -> list:
@@ -286,12 +402,17 @@ def main() -> int:
     ap.add_argument("--at", help="HHMM label override (tests only)")
     ap.add_argument("--score", action="store_true")
     ap.add_argument("--weekly", action="store_true")
+    ap.add_argument("--repair-borrow", nargs="?", const="", default=None, metavar="YYYY-MM-DD",
+                    help="re-fetch borrow_status of that day's 'error' ledger rows (default today, UTC)")
     ap.add_argument("--probe", help="comma symbols: print parsed locate quote (read-only demo)")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     from monitoring.cron_guard import attach_telegram_error_handler
     if not a.dry_run:
         attach_telegram_error_handler()
+    if a.repair_borrow is not None:
+        repair_borrow(a.repair_borrow or datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        return 0
     if a.probe:
         syms = a.probe.split(",")
         s = make_session()
