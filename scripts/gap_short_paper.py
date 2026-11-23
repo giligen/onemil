@@ -308,6 +308,11 @@ def run_pick(dry_run: bool, client=None, broker=None, session=None, universe=Non
         sym = p["symbol"]
         flags = ll.fetch_asset_flags(session, sym)
         bs = flags["borrow_status"]
+        if bs == "error":
+            # 2026-11-23: the shared helper logs WARNING per symbol (the locate ledger aggregates its 600 names into one
+            # ERROR); a gap-short pick is money, so each failed flags lookup pages on its own.
+            logger.error("pick: %s asset flags unavailable (%s) -- borrow_status recorded as 'error', the broker decides "
+                         "shortability", sym, flags.get("reason") or "unknown")
         loc = locs.get(sym, {"locate_status": "error", "fee_per_share": ""})
         fee = loc.get("fee_per_share", "")
         fee_bp = fee / p["pm_last"] * 1e4 if fee != "" else ""

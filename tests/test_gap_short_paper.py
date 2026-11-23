@@ -656,11 +656,27 @@ def test_pick_shortable_unknown_still_submits(paths):
 def test_fetch_asset_flags_parses_200_and_error_dict_on_500(caplog):
     ll = gp.ll
     s = _flags_session(borrow_status="hard_to_borrow", shortable=False, easy_to_borrow=False)
-    assert ll.fetch_asset_flags(s, "LITX") == {"borrow_status": "hard_to_borrow", "shortable": False, "easy_to_borrow": False}
+    keys = ("borrow_status", "shortable", "easy_to_borrow")
+    ok = ll.fetch_asset_flags(s, "LITX")
+    assert {k: ok[k] for k in keys} == {"borrow_status": "hard_to_borrow", "shortable": False, "easy_to_borrow": False}
     s.get.return_value.status_code = 500
-    with caplog.at_level("ERROR"):
-        assert ll.fetch_asset_flags(s, "LITX") == {"borrow_status": "error", "shortable": None, "easy_to_borrow": None}
-    assert any(r.levelname == "ERROR" for r in caplog.records)
+    with caplog.at_level("WARNING"):
+        err = ll.fetch_asset_flags(s, "LITX")
+    assert {k: err[k] for k in keys} == {"borrow_status": "error", "shortable": None, "easy_to_borrow": None}
+    # 2026-11-23: the shared helper logs WARNING per symbol (the ledger aggregates 600 names into one ERROR, eee81ef);
+    # the gap-short pick loop pages its own ERROR per failed pick (test below).
+    assert any(r.levelname == "WARNING" and "LITX" in r.message for r in caplog.records)
+    assert not any(r.levelname == "ERROR" and "borrow_status failed" in r.message for r in caplog.records)
+
+
+def test_pick_asset_flags_error_pages_an_error_per_pick(paths, caplog):
+    """A pick whose /v2/assets lookup fails is money: the pick loop logs ERROR itself (the helper only WARNs)."""
+    s = _flags_session(borrow_status="hard_to_borrow", shortable=True)
+    s.get.return_value.status_code = 500
+    with caplog.at_level("WARNING"):
+        gp.run_pick(True, _client(SNAPS, {"AAA": _bars(9e6)}), _broker(), s, UNI, NOW)
+    errs = [r for r in caplog.records if r.levelname == "ERROR" and "asset flags unavailable" in r.message]
+    assert len(errs) == 1 and "AAA" in errs[0].message
 
 
 def test_item18_etb_blank_locate_fee_is_info_not_warning(caplog):
