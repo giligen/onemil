@@ -297,3 +297,38 @@ class TestGetStockInfo:
 
         assert result['sector'] == 'Finance'
         assert result['float_shares'] == 5_000_000
+
+
+# =============================================================================
+# yfinance 404 noise (2026-11-23): the library's own ERROR for a delisted symbol must not page Telegram
+# =============================================================================
+
+class TestYFinanceNotFoundFilter:
+    """The ``yfinance`` logger's 'HTTP Error 404 ... Quote not found' lines are WARNING, other errors stay ERROR."""
+
+    def test_404_is_downgraded_to_warning(self, caplog):
+        import logging
+        import data_sources.float_provider  # noqa: F401 - installs the filter at import
+        with caplog.at_level(logging.WARNING, logger="yfinance"):
+            logging.getLogger("yfinance").error(
+                'HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found",'
+                '"description":"Quote not found for symbol: XOMA"}}}')
+        recs = [r for r in caplog.records if r.name == "yfinance"]
+        assert len(recs) == 1
+        assert recs[0].levelno == logging.WARNING and recs[0].levelname == "WARNING"
+        assert "XOMA" in recs[0].getMessage()
+
+    def test_other_yfinance_errors_stay_error(self, caplog):
+        import logging
+        import data_sources.float_provider  # noqa: F401
+        with caplog.at_level(logging.WARNING, logger="yfinance"):
+            logging.getLogger("yfinance").error("HTTP Error 500: upstream failure")
+        recs = [r for r in caplog.records if r.name == "yfinance"]
+        assert len(recs) == 1 and recs[0].levelno == logging.ERROR
+
+    def test_filter_installed_once(self):
+        import importlib, logging
+        import data_sources.float_provider as fp
+        importlib.reload(fp)
+        filters = [f for f in logging.getLogger("yfinance").filters if type(f).__name__ == "_YFinanceNotFoundFilter"]
+        assert len(filters) == 1

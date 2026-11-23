@@ -20,6 +20,26 @@ import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
+
+class _YFinanceNotFoundFilter(logging.Filter):
+    """Downgrade yfinance's own ``HTTP Error 404 ... Quote not found`` ERROR lines to WARNING.
+
+    Yahoo answers 404 for delisted or renamed symbols; the batch already treats that as "no float
+    data" (volume-based estimate). The library logs the 404 itself at ERROR on the ``yfinance``
+    logger, which the root Telegram error handler pages (86 lines on 2026-11-23, 241 on 10/19).
+    The line stays in the log at WARNING; every other yfinance ERROR passes through unchanged."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.ERROR and "404" in record.getMessage():
+            record.levelno = logging.WARNING
+            record.levelname = "WARNING"
+        return True
+
+
+_yf_logger = logging.getLogger("yfinance")
+if not any(type(f).__name__ == "_YFinanceNotFoundFilter" for f in _yf_logger.filters):  # survives a module reload
+    _yf_logger.addFilter(_YFinanceNotFoundFilter())
+
 # Retry config for Yahoo Finance rate limits
 MAX_RETRIES = 3
 INITIAL_BACKOFF_SECONDS = 2.0
