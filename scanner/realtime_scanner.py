@@ -9,6 +9,7 @@ Uses Alpaca SIP feed for real-time data.
 """
 
 import logging
+import threading
 import time as time_mod
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone, date
@@ -132,6 +133,8 @@ class RealtimeScanner:
         self.verbose = verbose
         self.trading_engine = trading_engine
         self.notifier = notifier
+        self._orb_tick_lock = threading.Lock()   # 2026-11-23: ORB ticks never stack
+        self._orb_tick_started_at = 0.0
         self._consecutive_cycle_failures = 0   # 2026-11-05: transient Alpaca drops page only on the 2nd in a row
         self.shutdown_event = shutdown_event
         self.macd_engine = macd_engine
@@ -817,33 +820,49 @@ class RealtimeScanner:
         Runs in the parallel engine-tick thread pool. Isolated from bull flag
         and MACD wave — uses separate AlpacaClient (paper account in Phase 1).
         build_universe is idempotent — preserves candidate state across ticks.
+
+        2026-11-23: a tick that finds the previous one still running logs WARNING and returns
+        (a slow reconcile used to stack ticks behind the engine lock and page "Engine tick TIMEOUT").
         """
-        # The 09:35 entry evaluation belongs to ORB's own drain thread — this
-        # tick must never be what decides when the day's picks are submitted
-        # (2026-09-18: first submit 48.9s after 09:35:00, sequenced behind the
-        # scan cycle and this method's own universe query). Idempotent; logs
-        # an ERROR and restarts if the thread ever died.
-        if self.orb_engine.enabled:
-            self.orb_engine.start_entry_drain_thread()
-        # Seed universe from BOTH pre-market gap candidates AND intraday
-        # qualified stocks. Pre-market is critical so ORB has candidates by
-        # 9:35 ET (the first range-close event); intraday keeps adding as
-        # new qualifiers arrive.
-        # Past ORB's own last-entry cutoff no candidate can be entered, so the
-        # seed + snapshot + gap-gate build is skipped (one INFO per day).
-        # Exits run FIRST (A3, 2026-10-03): the universe build can take
-        # tens of seconds at the open and a slow or failing build must never
-        # starve stop/exit management of open positions.
-        self.orb_engine.check_exits()
-        if self.orb_engine.universe_build_due():
-            self.orb_engine.build_universe(
-                source_loader=self._orb_universe_source,
-            )
-        self.orb_engine.check_entries()
-        if self.orb_engine.is_force_close_time():
-            self.orb_engine.force_close_all()
-        # (Ignition moved OUT of _orb_tick 2026-09-01 — see _ignition_tick;
-        # piggybacking here meant it stopped at force_close time.)
+        lock = getattr(self, '_orb_tick_lock', None)
+        if lock is None:
+            # A scanner built without __init__ (test harnesses use __new__) gets its lock on first use.
+            lock = self._orb_tick_lock = threading.Lock()
+            self._orb_tick_started_at = 0.0
+        if not lock.acquire(blocking=False):
+            logger.warning("ORB tick skipped — previous tick still running (started %.0fs ago)",
+                           time_mod.time() - self._orb_tick_started_at)
+            return
+        self._orb_tick_started_at = time_mod.time()
+        try:
+            # The 09:35 entry evaluation belongs to ORB's own drain thread — this
+            # tick must never be what decides when the day's picks are submitted
+            # (2026-09-18: first submit 48.9s after 09:35:00, sequenced behind the
+            # scan cycle and this method's own universe query). Idempotent; logs
+            # an ERROR and restarts if the thread ever died.
+            if self.orb_engine.enabled:
+                self.orb_engine.start_entry_drain_thread()
+            # Seed universe from BOTH pre-market gap candidates AND intraday
+            # qualified stocks. Pre-market is critical so ORB has candidates by
+            # 9:35 ET (the first range-close event); intraday keeps adding as
+            # new qualifiers arrive.
+            # Past ORB's own last-entry cutoff no candidate can be entered, so the
+            # seed + snapshot + gap-gate build is skipped (one INFO per day).
+            # Exits run FIRST (A3, 2026-10-03): the universe build can take
+            # tens of seconds at the open and a slow or failing build must never
+            # starve stop/exit management of open positions.
+            self.orb_engine.check_exits()
+            if self.orb_engine.universe_build_due():
+                self.orb_engine.build_universe(
+                    source_loader=self._orb_universe_source,
+                )
+            self.orb_engine.check_entries()
+            if self.orb_engine.is_force_close_time():
+                self.orb_engine.force_close_all()
+            # (Ignition moved OUT of _orb_tick 2026-09-01 — see _ignition_tick;
+            # piggybacking here meant it stopped at force_close time.)
+        finally:
+            lock.release()
 
     def _compute_orb_sqlite_prefilter(self) -> Set[str]:
         """Run the daily_bars ROW_NUMBER prev-day pre-filter query that seeds

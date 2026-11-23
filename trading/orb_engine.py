@@ -4754,10 +4754,32 @@ class ORBEngine:
             if abs(_fc.range_data.range_high - _st['provisional_range_high']) >= 0.005:
                 self._cancel_symbol_open_orders(sym)
                 _to_wait.append((sym, _pos.order_id))
+        # 2026-11-23: every not-in-final name joins the SAME cancel pass (5 serial 15 s waits stalled
+        # the 09:35 tick 92 s). Same predicate as the not-in-final branch below.
+        for sym in preplaced_syms:
+            _st = self._preplace_state[sym]
+            _pos = self.open_positions.get(sym)
+            if not _st.get('submitted') or _pos is None or not _pos.order_id:
+                continue
+            _fc = final_by_sym.get(sym)
+            _final_rh = _fc.range_data.range_high if _fc is not None and _fc.range_data else None
+            if sym not in final_top_syms or _final_rh is None:
+                self._cancel_symbol_open_orders(sym)
+                _to_wait.append((sym, _pos.order_id))
         _t0 = time.monotonic()
         for sym, oid in _to_wait:
             late_results[sym] = self._await_terminal(
                 oid, max_wait_s=max(0.0, self._RECONCILE_WAIT_S - (time.monotonic() - _t0)))
+        if _to_wait:
+            _n_term = sum(1 for sym, _ in _to_wait
+                          if late_results[sym][0] in self._TERMINAL_ORDER_STATUSES)
+            _n_pend = len(_to_wait) - _n_term
+            _msg = (f"[ORB PREPLACE] cancel pass: {len(_to_wait)} orders, {_n_term} terminal within "
+                    f"{time.monotonic() - _t0:.1f}s, {_n_pend} still pending")
+            if _n_pend:
+                logger.warning(_msg)
+            else:
+                logger.info(_msg)
 
         for sym in preplaced_syms:
             st = self._preplace_state[sym]
@@ -4790,7 +4812,7 @@ class ORBEngine:
 
             if sym not in final_top_syms or final_rh is None:
                 if pos is not None:
-                    if not self._cancel_preplaced_order(sym, pos):
+                    if not self._cancel_preplaced_order(sym, pos, awaited=late_results.get(sym)):
                         continue  # partially filled: the fill path owns it (WARNING logged)
                     del self.open_positions[sym]
                 self._pdr_vetoed_today.add(sym)  # no-refill: never re-entered today
@@ -4912,18 +4934,26 @@ class ORBEngine:
             final = {'filled_qty': filled_qty}
         self._confirm_fill(pos, final)
 
-    def _cancel_preplaced_order(self, sym: str, pos) -> bool:
+    def _cancel_preplaced_order(self, sym: str, pos,
+                                awaited: Optional[Tuple[str, int]] = None) -> bool:
         """Cancel the resting entry of a preplaced name that fell outside the final top-N and
         mark its trades row `order_status='preplace_canceled'`, `exit_reason='preplace_reconcile'`
         (2026-10-20: the broker showed IREX `canceled` while the row stayed `pending_new`).
 
+        `awaited=(status, filled_qty)` is the result of the reconcile's shared cancel pass
+        (2026-11-23): the cancel was already sent and awaited, so neither is repeated here. With
+        None (any other caller) it cancels and awaits itself exactly as before.
+
         Returns True when the order is gone and the row is marked. Returns False — row NOT marked,
         WARNING logged — when the broker reports filled_qty > 0 after the cancel: the existing fill
         path (`_confirm_fill`) owns a (partially) filled order."""
-        self._cancel_symbol_open_orders(sym)
         filled_qty = 0
-        if pos.order_id:
-            _status, filled_qty = self._await_terminal(pos.order_id)
+        if awaited is not None:
+            filled_qty = awaited[1]
+        else:
+            self._cancel_symbol_open_orders(sym)
+            if pos.order_id:
+                _status, filled_qty = self._await_terminal(pos.order_id)
         if filled_qty > 0:
             logger.warning(f"[ORB PREPLACE] {sym}: cancel at reconcile but {filled_qty} sh already "
                            f"filled — row NOT marked canceled, fill path owns it")
