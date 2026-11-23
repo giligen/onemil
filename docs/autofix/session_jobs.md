@@ -10,17 +10,17 @@ Box clock = UTC. ET = UTC−5 (EST, until 2027-03-14).
 
 ## 1. GAPSHORT nightly maintenance — id 2b543d5c
 * cron: `7 22 * * 1-5` (22:07 UTC ≈ 17:07 ET, after the 16:35 ET parity and the 16:15 ET score)
-* created 2026-11-14 (Sat) → expires 2026-11-21; re-arm every Saturday
+* created 2026-11-14 (Sat); still armed on 2026-11-23 (CronList: next run 22:37 UTC) — re-arm as soon as CronList no longer lists it
 * prompt: the text in `docs/autofix/gapshort_autofix_prompt.md` (read today's `[GAPSHORT PARITY]` row and the
   gap_short logs; OK line to `logs/gap_short_autofix.log` or dispatch ONE Sonnet fixer under the allow-list / frozen
   constants in `trading/gap_short_rules.py`; full suite; commit + push; `[GAPSHORT FIX]` Telegram; strategy questions
   go to the owner, never changed)
 * fallback when no session is alive: `scripts/gapshort_autofix.sh` (headless `claude -p`), not in crontab by default
 
-## 2. Trading-hours error watch — id ae4a75e5
+## 2. Trading-hours error watch — id 54a011fc (was ae4a75e5)
 * cron: `3,18,33,48 14-21 * * 1-5` (every 15 min 14:03–21:48 UTC = 09:03–16:48 ET; covers the 09:20 pick, 09:25
   locate ledger, 10:30 cover, 10:40 flatten, 16:15 score, 16:35 parity)
-* created 2026-11-16 (Mon) → expires 2026-11-23; re-arm every Saturday together with job 1
+* re-armed 2026-11-23 22:2x UTC (Mon, after the 11/16 job fired its last tick at 22:18) → expires 2026-11-30; re-arm every Saturday together with job 1
 * prompt (verbatim):
 ```
 Trading-hours error watch (owner 2026-11-16: "monitor telegram during trade hours every 15 min for errors, fix if
