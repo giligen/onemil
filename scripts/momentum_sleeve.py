@@ -994,7 +994,8 @@ def live_guards(client: AlpacaClient, args, state: Dict, selected: List[str], or
                 prices: Dict[str, float], equity: float) -> Tuple[List[Dict], bool, List[str]]:
     """LIVE-only plan guards on the shared account. Returns (orders, rail_hit, lines for the log/Telegram).
 
-    * the drawdown rail (sleeve equity <= 0.75 x start) replaces the plan by full exits of the STATE names;
+    * the drawdown rail (sleeve equity <= 0.75 x start) replaces the plan by full exits of the STATE names
+      (the Telegram line avoids '<': 2026-11-23 the '<=' broke HTML parse mode and the notifier fell back to plain text);
     * buy collisions (a selected name the broker holds outside the state) lose their buy -- cash stays cash;
     * the count of non-sleeve positions is reported, never their symbols."""
     lines: List[str] = []
@@ -1005,7 +1006,7 @@ def live_guards(client: AlpacaClient, args, state: Dict, selected: List[str], or
     if rail:
         cur = {s: q * prices[s] for s, q in state['positions'].items() if s in prices and q > 0}
         orders = ms.rebalance_orders(cur, {})
-        lines.append(f"RAIL: sleeve equity ${equity:,.0f} <= {ml.DD_PAUSE_FRAC:.0%} of ${state['equity_start']:,.0f} -> "
+        lines.append(f"RAIL: sleeve equity ${equity:,.0f} at or below {ml.DD_PAUSE_FRAC:.0%} of ${state['equity_start']:,.0f} -> "
                      f"SELL EVERYTHING the state holds and PAUSE")
         logger.error("momentum_sleeve: drawdown rail hit -- liquidating the sleeve")
         return orders, True, lines
