@@ -8,9 +8,9 @@ report" (trading-hours watch) and "dump all existing monitors to an md file if s
 
 Box clock = UTC. ET = UTC−5 (EST, until 2027-03-14).
 
-## 1. GAPSHORT nightly maintenance — id 2b543d5c
+## 1. GAPSHORT nightly maintenance — id 5c10f188 (was 2b543d5c)
 * cron: `7 22 * * 1-5` (22:07 UTC ≈ 17:07 ET, after the 16:35 ET parity and the 16:15 ET score)
-* created 2026-11-14 (Sat); still armed on 2026-11-23 (CronList: next run 22:37 UTC) — re-arm as soon as CronList no longer lists it
+* created 2026-11-14 (Sat); 2b543d5c fired through 2026-11-23 and was gone from CronList on 11/24 → re-armed 2026-11-24 05:2x UTC as 5c10f188 (expires 2026-12-01; re-arm Saturday 11/28 or as soon as CronList no longer lists it)
 * prompt: the text in `docs/autofix/gapshort_autofix_prompt.md` (read today's `[GAPSHORT PARITY]` row and the
   gap_short logs; OK line to `logs/gap_short_autofix.log` or dispatch ONE Sonnet fixer under the allow-list / frozen
   constants in `trading/gap_short_rules.py`; full suite; commit + push; `[GAPSHORT FIX]` Telegram; strategy questions
@@ -46,3 +46,8 @@ per the user-level cascade policy and end with the Models: line.
 2. `CronCreate` each missing job with the cron + prompt above (`recurring: true`).
 3. Update the "created / expires" lines here, commit.
 4. Memory pointer: `project_gapshort_session_maintenance.md` (nightly) and `project_session_jobs_nov2026.md` (this file).
+
+## 3. One-shot: MOM live re-entry — id 00b3ac6f (2026-11-24 14:37 UTC)
+* owner 2026-11-24 00:13 ET: "turn back on the sleeve you put down, force it" after the 11/23 drawdown-rail liquidation
+* state_live.json re-based (equity_start/peak 10000 → 7058.95, pause cleared), crontab live lines `--equity-start 7059`
+* runs `scripts/momentum_sleeve.py --live --submit --skip-fetch --force --equity-start 7059`, reports fills; auto-deletes
