@@ -366,6 +366,18 @@ class OpenPosition:
     add_be_leg: Optional[Dict] = None                       # stop_mode='add_breakeven' tracking
     add_be_pnl: float = 0.0                                 # booked once the add_be_leg exits
     add_pending_order_id: str = ''                          # in-flight add buy; '' = none
+    # 2026-11-24 (RAMZ): a bracket leg's qty can never change (Alpaca 42210000), so the added
+    # shares get their OWN plain stop-sell; its order ids live here (persisted in add_on).
+    add_stop_leg_ids: List[str] = field(default_factory=list)
+
+
+ADVANCED_ORDER_CLASSES = frozenset({'bracket', 'oco', 'oto'})
+
+
+def _add_stop_ids_from_pdata(pdata: Dict) -> List[str]:
+    """Rehydrate OpenPosition.add_stop_leg_ids from a trade's pattern_data (empty when absent)."""
+    ids = dict((pdata or {}).get('add_on') or {}).get('add_stop_leg_ids') or []
+    return [str(i) for i in ids]
 
 
 class ORBEngine:
@@ -2845,6 +2857,7 @@ class ORBEngine:
                 'add_avg_px': pos.combined_avg_price,
                 'add_be_leg': pos.add_be_leg,
                 'add_be_pnl': pos.add_be_pnl,
+                'add_stop_leg_ids': list(pos.add_stop_leg_ids),
             }
             _upd = {
                 'shares': pos.shares,
@@ -2924,14 +2937,22 @@ class ORBEngine:
                 f"[ORB] ADD {pos.symbol}: broker shows only {broker_qty}sh long "
                 f"(wanted legs at {new_qty}sh) — capping to the broker's qty")
             applied = broker_qty
+        sym = pos.symbol
+        if applied < int(pos.shares):
+            self._cancel_add_stops(pos)       # shrink (ADD-BE): the add shares' own stops go first
         for attr in ('sl_leg_id', 'tp_leg_id'):
             leg_id = getattr(pos, attr, '')
             if not leg_id:
                 continue
             try:
-                if self._leg_qty(leg_id) == applied:
-                    logger.info(f"[ORB] ADD {pos.symbol}: {attr} ({leg_id[:8]}) already covers "
+                info = self._leg_info(leg_id)
+                leg_qty = info['qty'] if info else None
+                if leg_qty == applied:
+                    logger.info(f"[ORB] ADD {sym}: {attr} ({leg_id[:8]}) already covers "
                                 f"{applied}sh — replace skipped")
+                    continue
+                if info and info['order_class'] in ADVANCED_ORDER_CLASSES:
+                    self._handle_advanced_leg(pos, attr, leg_id, info, applied)
                     continue
                 res = self.alpaca.replace_order_qty(leg_id, applied)
                 new_id = (res or {}).get('id') or ''
@@ -2939,7 +2960,7 @@ class ORBEngine:
                     setattr(pos, attr, new_id)
             except Exception as e:
                 logger.error(
-                    f"[ORB] ADD {pos.symbol}: resize {attr} ({leg_id[:8]}) FAILED: {e} — "
+                    f"[ORB] ADD {sym}: resize {attr} ({leg_id[:8]}) FAILED: {e} — "
                     f"safety leg still covers only the pre-add qty")
         if self.stop_monitor is not None:
             try:
@@ -2948,16 +2969,75 @@ class ORBEngine:
                 logger.error(f"[ORB] ADD {pos.symbol}: StopMonitor resize_watch_qty failed: {e}")
         return applied
 
-    def _leg_qty(self, leg_id: str) -> Optional[int]:
-        """Current broker qty of an exit leg, or None when it cannot be read (the caller then
-        proceeds with the replace, the safe direction)."""
+    def _handle_advanced_leg(self, pos: 'OpenPosition', attr: str, leg_id: str,
+                             info: Dict, applied: int) -> None:
+        """A bracket/oco/oto leg can never change qty (Alpaca 42210000): never call replace.
+        Growth: the SL leg gets ONE dedicated plain stop-sell for the delta shares (tracked in
+        pos.add_stop_leg_ids); the TP leg is left alone (the exit cancels every open order of the
+        symbol and sells the combined qty). Shrink: the add stops were cancelled by the caller."""
+        sym = pos.symbol
+        delta = applied - int(info['qty'] or 0)
+        if attr == 'tp_leg_id':
+            logger.info(f"[ORB] ADD {sym}: bracket TP leg {leg_id[:8]} keeps {info['qty']}sh — the "
+                        f"StopMonitor exit cancels every open order of the symbol and sells the combined qty")
+            return
+        if delta < 0:
+            logger.info(f"[ORB] ADD {sym}: bracket SL leg {leg_id[:8]} exceeds the remaining qty — the "
+                        f"exit path's symbol-wide cancel handles it")
+            return
+        px = 0.0
         try:
-            raw = self._order_field(self.alpaca.get_order(leg_id), 'qty')
-            if isinstance(raw, (int, float, str)) and raw != '':
-                return int(float(raw))
+            snap = self.stop_monitor.get_watch_snapshot(sym) if self.stop_monitor is not None else None
+            px = float((snap or {}).get('stop_price') or 0.0)
         except Exception as e:
-            logger.warning(f"[ORB] ADD: could not read leg {leg_id[:8]} qty ({e}) — will replace")
+            logger.warning(f"[ORB] ADD {sym}: watch stop unreadable ({e}) — using the leg's own stop")
+        if px <= 0:
+            px = float(info.get('stop_price') or 0.0)
+        try:
+            res = self.alpaca.submit_stop_sell_order(sym, delta, px)
+            new_id = (res or {}).get('id') or ''
+            if not new_id:
+                raise RuntimeError('broker returned no order id')
+        except Exception as e:
+            logger.error(f"[ORB] ADD {sym}: add stop for {delta}sh could not be placed ({e}) — "
+                         f"add shares NAKED until exit coverage repairs")
+            return
+        pos.add_stop_leg_ids.append(new_id)
+        logger.info(f"[ORB] ADD {sym}: bracket SL leg {leg_id[:8]} keeps {info['qty']}sh (Alpaca 42210000: "
+                    f"an advanced-order leg's qty cannot change) — add stop {new_id[:8]} placed for "
+                    f"{delta}sh @ ${px:.2f}")
+
+    def _cancel_add_stops(self, pos: 'OpenPosition') -> None:
+        """Cancel the position's dedicated add stops (ADD-BE shrink); a failed cancel keeps the id."""
+        for oid in list(pos.add_stop_leg_ids):
+            try:
+                self.alpaca.cancel_order(oid)
+                pos.add_stop_leg_ids.remove(oid)
+                logger.info(f"[ORB] ADD {pos.symbol}: add stop {oid[:8]} cancelled (position shrinks)")
+            except Exception as e:
+                logger.warning(f"[ORB] ADD {pos.symbol}: add stop {oid[:8]} cancel failed ({e}) — id kept")
+
+    def _leg_info(self, leg_id: str) -> Optional[Dict]:
+        """One get_order -> {'qty', 'order_class', 'stop_price'} of an exit leg, or None when it
+        cannot be read (the caller then proceeds with the replace, the legacy path; WARNING logged)."""
+        try:
+            order = self.alpaca.get_order(leg_id)
+            raw = self._order_field(order, 'qty')
+            if not (isinstance(raw, (int, float, str)) and raw != ''):
+                return None
+            oc = str(getattr(self._order_field(order, 'order_class'), 'value',
+                             self._order_field(order, 'order_class')) or '').lower().rsplit('.', 1)[-1]
+            sp = self._order_field(order, 'stop_price')
+            return {'qty': int(float(raw)), 'order_class': oc,
+                    'stop_price': float(sp) if isinstance(sp, (int, float, str)) and sp != '' else None}
+        except Exception as e:
+            logger.warning(f"[ORB] ADD: could not read leg {leg_id[:8]} ({e}) — will replace")
         return None
+
+    def _leg_qty(self, leg_id: str) -> Optional[int]:
+        """Current broker qty of an exit leg (thin wrapper over _leg_info), None when unreadable."""
+        info = self._leg_info(leg_id)
+        return info['qty'] if info else None
 
     def _audit_touchgo(self, pos: 'OpenPosition', rule: str, fired: bool,
                        exit_p, last_ts, bb_ts, range_size: float,
@@ -8356,6 +8436,7 @@ class ORBEngine:
                 combined_avg_price=(dict(pdata.get('add_on') or {}).get('add_avg_px')),
                 add_be_leg=(dict(pdata.get('add_on') or {}).get('add_be_leg')),
                 add_be_pnl=float(dict(pdata.get('add_on') or {}).get('add_be_pnl') or 0.0),
+                add_stop_leg_ids=_add_stop_ids_from_pdata(pdata),
             )
             if db_scaled_at:
                 pos.scale_qty = db_scale_qty
