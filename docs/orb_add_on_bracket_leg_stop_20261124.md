@@ -91,3 +91,16 @@ rehydrated. No change to the exit-qty cap, the broker-qty ERROR or `resize_watch
 client_order_id (same as exit coverage's stop) — accepted. Touched set 115 green in the main session. Full suite + commit at
 the post-close one-shot; live at the next 12:30 UTC boot. Pre-existing and untouched: a scale-out while a second stop holds
 shares (coverage stop today, add stop tomorrow) still depends on the 11/13 D2 "shrink" path, and D4 stays open.
+
+## Follow-up found at the post-close check (2026-11-24 21:2x UTC): FC DB SYNC priced add-on rows off the base fill
+* All four add-on positions were force-closed 15:45 ET at market (RAMZ 432 @ 24.02, NVDQ 1022 @ 9.93, MUD 776 @ 13.1782,
+  MUZ 302 @ 11.51; every bracket leg and coverage stop cancelled cleanly). `_sync_db_after_fc` booked each row's P&L from
+  `fill_price` (the BASE fill — D3 11/13 keeps it so for rehydrate) instead of the blended `pattern_data.add_on.add_avg_px`:
+  rows 882-885 carry +411.70 / +214.62 / +243.45 / +145.72 = +$1,015.49 where the blended basis gives +208.58 / −21.93 /
+  +89.76 / +51.72 = +$328.13 (overstated by $687.36). The StopMonitor exit path (`_handle_exit_event` ~7196) already uses
+  `combined_avg_price`; only the FC sync path was wrong. The DB rows are left as they are — a four-row correction is the
+  owner's call (the ORB ramp gate and the EOD report read these numbers).
+* Fix (main session, inline): `ORBEngine._add_on_pdata(row)` reads the add_on block (JSON or dict, WARNING + {} when
+  unreadable); the FC sync uses `add_avg_px` when present (else `fill_price`) and composes `add_be_pnl` once.
+  Tests `tests/test_orb_fc_sync_addon_basis_20261124.py` (6: RAMZ replay, add-be composition, no-add row unchanged,
+  unreadable pattern_data, scaled row pinned, helper). Touched set 91 green; full suite before the commit.

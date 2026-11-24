@@ -374,6 +374,23 @@ class OpenPosition:
 ADVANCED_ORDER_CLASSES = frozenset({'bracket', 'oco', 'oto'})
 
 
+def _add_on_pdata(row: Dict) -> Dict:
+    """The `add_on` block of a trades row's pattern_data (JSON string or dict), {} when absent or
+    unparseable (WARNING: the caller then prices the row off its base fill). Module-level so test
+    harnesses that borrow engine methods onto a fake engine keep working."""
+    raw = (row or {}).get('pattern_data')
+    if not raw:
+        return {}
+    import json as _json
+    try:
+        pdata = _json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (TypeError, ValueError) as e:
+        logger.warning(f"FC DB SYNC: pattern_data unreadable for row {(row or {}).get('id')} ({e}) -- "
+                       f"pricing off the base fill")
+        return {}
+    return dict(pdata.get('add_on') or {})
+
+
 def _add_stop_ids_from_pdata(pdata: Dict) -> List[str]:
     """Rehydrate OpenPosition.add_stop_leg_ids from a trade's pattern_data (empty when absent)."""
     ids = dict((pdata or {}).get('add_on') or {}).get('add_stop_leg_ids') or []
@@ -9396,7 +9413,12 @@ class ORBEngine:
                     f"FC DB SYNC {sym}: no FILLED sell order found at Alpaca"
                 )
                 continue
-            entry_price = float(t.get('fill_price') or 0)
+            # 2026-11-24 (RAMZ/NVDQ/MUD/MUZ): after an add-on the row's fill_price is the BASE fill only;
+            # the blended cost basis and the add-be leg's booked P&L live in pattern_data.add_on (D3, 11/13).
+            # Pricing the combined qty off the base fill overstated the day's P&L by $687 on four rows.
+            _addon = _add_on_pdata(t)
+            entry_price = float(_addon.get('add_avg_px') or 0) or float(t.get('fill_price') or 0)
+            _add_be_pnl = float(_addon.get('add_be_pnl') or 0.0)
             entry_qty = int(t.get('filled_qty') or t.get('shares') or 0)
             if entry_price <= 0 or entry_qty <= 0:
                 continue
@@ -9419,7 +9441,7 @@ class ORBEngine:
                     f"{sell_qty}sh vs entry {entry_qty} - scale {scale_qty}; "
                     f"using the close order's qty")
             exit_price = float(sell.filled_avg_price)
-            pnl = (exit_price - entry_price) * shares + scale_pnl
+            pnl = (exit_price - entry_price) * shares + scale_pnl + _add_be_pnl
             entry_notional = entry_price * entry_qty
             pnl_pct = (pnl / entry_notional * 100) if entry_notional > 0 else 0.0
             try:
