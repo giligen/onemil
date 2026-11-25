@@ -124,6 +124,25 @@ class TestSettleBeforeReplace:
         assert not any(r.levelno >= logging.ERROR and 'FAILED twice' in r.message for r in caplog.records)
         assert not any('UNPROTECTED' in str(c) for c in notifier.send_message.call_args_list)
 
+    def test_first_rejection_logs_warning_not_error_when_the_retry_is_accepted(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path, caplog):
+        """2026-11-25 UVXY: the partial fill's 2-sh legs were terminal but Alpaca still held their reservation, the
+        60-sh replacement hit 40310000 once and the 2-s retry was accepted — that first miss is a WARNING, never an
+        ERROR (two false ERROR telegrams on a race the retry absorbs by design)."""
+        e, cand = _engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        e.notifier = MagicMock()
+        rej = Exception('{"available":"58","code":40310000,"existing_qty":"60","held_for_orders":"2"}')
+        hod_live_alpaca.submit_oco_sell_order.side_effect = [
+            rej, {'id': 'tp-9', 'status': 'accepted', 'legs': [{'id': 'sl-9', 'type': 'stop'}]}]
+        hod_live_alpaca.submit_stop_sell_order.side_effect = [rej]
+        lo = _lo(); cand.live_order = lo
+        with caplog.at_level(logging.WARNING):
+            _fill(e, cand, lo, 60, 'filled')
+        assert e.positions['ABC'].sl_leg_id == 'sl-9'
+        assert not any(r.levelno >= logging.ERROR and 'ABC' in r.message for r in caplog.records)
+        first = [r for r in caplog.records if r.levelno == logging.WARNING and 'submit failed after a LIVE fill' in r.message]
+        assert len(first) == 2 and all('one retry follows' in r.message for r in first)
+
     def test_rejected_twice_logs_error_and_sends_an_ungated_telegram_with_symbol_qty_and_broker_message(
             self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path, caplog):
         e, cand = _engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
@@ -136,6 +155,8 @@ class TestSettleBeforeReplace:
             _fill(e, cand, lo, 63, 'filled')
         assert hod_live_alpaca.submit_oco_sell_order.call_count == 2
         assert any(r.levelno == logging.ERROR and 'FAILED twice' in r.message for r in caplog.records)
+        assert any(r.levelno == logging.ERROR and 'OCO submit failed after a LIVE fill' in r.message
+                   and 'one retry follows' not in r.message for r in caplog.records)   # the final attempt stays ERROR
         msgs = [str(c.args[0]) for c in notifier.send_message.call_args_list]
         assert any('ABC' in m and '63' in m and 'insufficient qty available' in m for m in msgs)
 

@@ -2284,10 +2284,16 @@ class HodBreakEngine:
         lo['booked_qty'] = filled_qty; lo['tp_leg_id'] = ''; lo['sl_leg_id'] = ''
         self._persist_live_orders()
 
-    def _submit_safety_net_once(self, sym: str, qty: int, target: float, sl_px: float) -> tuple:
+    def _submit_safety_net_once(self, sym: str, qty: int, target: float, sl_px: float, final: bool = True) -> tuple:
         """One attempt at the broker-side safety net: the OCO (TP limit + SL stop) and, when that gives no usable stop
-        leg, a stop-only fallback. Returns `(tp_id, sl_id, last_error)`; `sl_id == ''` means NOTHING protects the shares."""
+        leg, a stop-only fallback. Returns `(tp_id, sl_id, last_error)`; `sl_id == ''` means NOTHING protects the shares.
+        `final=False` is the first of two attempts: its broker rejects log WARNING, not ERROR (2026-11-25 UVXY: a partial
+        fill's 2-sh legs were `canceled` but Alpaca still held their reservation for ~3 s, so the 60-sh replacement hit
+        40310000 once and the 2-s retry was accepted — two ERROR telegrams for a race the retry is designed to absorb).
+        The caller's final attempt keeps ERROR."""
         tp_id = sl_id = ''; err = ''
+        fail_log = logger.error if final else logger.warning
+        retry_note = '' if final else ' (first attempt — one retry follows)'
         try:
             # ONE OCO order for both legs — Alpaca rejects two independent sell orders resting on the same shares
             # (2026-09-25 VECO live defect: separate TP limit + SL stop, the second submit failed with
@@ -2307,7 +2313,7 @@ class HodBreakEngine:
                 self._notify(f"{self.tag} WARNING OCO {sym}: no leg ids in response")
         except Exception as e:
             err = str(e)
-            logger.error(f"{self.tag} {sym}: safety-net OCO submit failed after a LIVE fill: {e} — falling back to a stop-only safety net")
+            fail_log(f"{self.tag} {sym}: safety-net OCO submit failed after a LIVE fill: {e} — falling back to a stop-only safety net{retry_note}")
         if not sl_id:
             # Fallback: never leave the position without a broker-side stop, even without a TP leg.
             try:
@@ -2315,18 +2321,18 @@ class HodBreakEngine:
                 logger.warning(f"{self.tag} {sym}: OCO unavailable — placed a stop-only safety net at {sl_px:.2f} (no broker TP leg)")
             except Exception as e:
                 err = str(e)
-                logger.error(f"{self.tag} {sym}: safety-net SL submit failed after a LIVE fill: {e}")
+                fail_log(f"{self.tag} {sym}: safety-net SL submit failed after a LIVE fill: {e}{retry_note}")
         return tp_id, sl_id, err
 
     def _place_safety_net(self, sym: str, qty: int, target: float, sl_px: float) -> tuple:
         """Place the safety net for `qty` shares; if nothing could be placed, WARNING + ONE retry after
         `oco_retry_delay_s` (default 2 s, the cancelled legs' reservation may still be draining); still nothing ->
         ERROR + ungated `_notify` (symbol, qty, broker message). Returns `(tp_id, sl_id)`."""
-        tp_id, sl_id, err = self._submit_safety_net_once(sym, qty, target, sl_px)
+        tp_id, sl_id, err = self._submit_safety_net_once(sym, qty, target, sl_px, final=False)
         if not sl_id:
             logger.warning(f"{self.tag} {sym}: safety-net placement for {qty} sh rejected ({err or 'no stop leg id'}) — retrying once in {self.oco_retry_delay_s:.1f}s")
             time.sleep(self.oco_retry_delay_s)
-            tp_id, sl_id, err = self._submit_safety_net_once(sym, qty, target, sl_px)
+            tp_id, sl_id, err = self._submit_safety_net_once(sym, qty, target, sl_px, final=True)
             if not sl_id:
                 cov = self._adopt_exit_coverage_stop(sym, err)
                 if cov:
