@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import logging
+import math
 import queue
 import re
 import threading
@@ -4748,6 +4749,16 @@ class ORBEngine:
         except Exception as e:
             logger.error(f"[ORB PREPLACE] submit-at-close failed: {e}")
 
+    def _log_final_rank_drop(self, sym: str, reason: str, preplaced: bool) -> None:
+        """Log why `_rank_production_final` dropped a ranged candidate (2026-11-24 SKDD: a preplaced
+        order was cancelled by the reconcile with no log line). WARNING when the name holds a
+        provisional order (the reconcile will cancel it), INFO otherwise. Logging only."""
+        if preplaced:
+            logger.warning(f"[ORB] FINAL RANK: {sym} dropped \u2014 {reason} \u2014 PREPLACED, "
+                           f"the reconcile will cancel its provisional order")
+        else:
+            logger.info(f"[ORB] FINAL RANK: {sym} dropped \u2014 {reason}")
+
     def _rank_production_final(self) -> List[CandidateState]:
         """Final-range ranking of ALL production candidates, the production
         branch of `_run_pool_selection` function by function: features ->
@@ -4777,13 +4788,27 @@ class ORBEngine:
             real_gap_pct = feats.get('gap_pct', None)
             if real_gap_pct is not None and not self._recheck_gap_admission(
                     feats, cand, self.universe_min_gap_pct).ok:
+                self._log_final_rank_drop(
+                    sym, f"gap {real_gap_pct:.2f}% < floor "
+                         f"{self.universe_min_gap_pct:.2f}% (phantom gap)", sym in self._preplace_state)
                 continue  # phantom gap (same floor as the production pass)
             score = composite_score(feats, self.z_params)
-            if score is None or score < self.filter_threshold:
+            if score is None:
+                missing = [k for k in self.z_params
+                           if feats.get(k) is None or (isinstance(feats.get(k), float) and math.isnan(feats[k]))]
+                self._log_final_rank_drop(
+                    sym, f"composite None, missing features: {missing}", sym in self._preplace_state)
+                continue
+            if score < self.filter_threshold:
+                self._log_final_rank_drop(
+                    sym, f"comp {score:.4f} < threshold {self.filter_threshold:.6f}",
+                    sym in self._preplace_state)
                 continue
             cand.composite = score
             cand.quintile = assign_quintile(score, self.quintile_cutoffs)
             if self.skip_q1 and cand.quintile == 'Q1':
+                self._log_final_rank_drop(
+                    sym, f"Q1 (comp {score:.4f})", sym in self._preplace_state)
                 continue
             scored.append(cand)
         q_rank = {q: i for i, q in enumerate(self.ranking_order)}
@@ -4836,6 +4861,13 @@ class ORBEngine:
             "[ORB PREPLACE] reconcile final top-%d of %d ranked: %s | preplaced: %s",
             self.max_concurrent, len(scored),
             [c.symbol for c in scored if c.symbol in final_top_syms], preplaced_syms)
+        # 2026-11-24 SKDD: a preplaced Q4 name re-ranked Q3 on its final range and fell to 9th behind a
+        # rangeless stand-in; the line above hides everything past the top-K, so the cancel looked unexplained.
+        logger.info(
+            "[ORB PREPLACE] reconcile ranking (Q, comp): %s | beyond top-%d: %s",
+            [f"{c.symbol}({c.quintile},{c.composite:.4f})" for c in scored if c.symbol in final_top_syms],
+            self.max_concurrent,
+            [f"{c.symbol}({c.quintile},{c.composite:.4f})" for c in scored if c.symbol not in final_top_syms])
 
         # Pre-pass: cancel every REPLACE candidate, then wait for all of them together (one bounded
         # 15 s loop) so the paper OMS cancel queue is not serialised (2026-10-27 CRDU late fill).
